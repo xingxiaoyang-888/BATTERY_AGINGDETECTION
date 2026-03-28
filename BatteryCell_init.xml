@@ -1,0 +1,250 @@
+<?xml version = "1.0" encoding="UTF-8"?>
+
+<!-- description of the model interface using an extention of the FMI standard -->
+<fmiModelDescription
+  fmiVersion                          = "1.0"
+
+  modelName                           = "BatteryCell"
+  modelIdentifier                     = "BatteryCell"
+
+  OPENMODELICAHOME                    = "D:/openmodelica"
+
+  guid                                = "{a6c834fe-2d31-4283-9703-211720f9570c}"
+
+  description                         = "Simplified High-Fidelity Cell Model"
+  generationTool                      = "OpenModelica Compiler OpenModelica v1.22.3 (64-bit)"
+  generationDateAndTime               = "2026-02-07T16:42:49Z"
+
+  variableNamingConvention            = "structured"
+
+  numberOfEventIndicators             = "0"  cmt_numberOfEventIndicators             = "NG:       number of zero crossings,                           FMI"
+  numberOfTimeEvents                  = "0"  cmt_numberOfTimeEvents                  = "NG_SAM:   number of zero crossings that are samples,          OMC"
+
+  numberOfInputVariables              = "1"  cmt_numberOfInputVariables              = "NI:       number of inputvar on topmodel,                     OMC"
+  numberOfOutputVariables             = "0"  cmt_numberOfOutputVariables             = "NO:       number of outputvar on topmodel,                    OMC"
+
+  numberOfExternalObjects             = "0"  cmt_numberOfExternalObjects             = "NEXT:     number of external objects,                         OMC"
+  numberOfFunctions                   = "0"  cmt_numberOfFunctions                   = "NFUNC:    number of functions used by the simulation,         OMC"
+
+  numberOfContinuousStates            = "3"  cmt_numberOfContinuousStates            = "NX:       number of states,                                   FMI"
+  numberOfRealAlgebraicVariables      = "4"  cmt_numberOfRealAlgebraicVariables      = "NY:       number of real variables,                           OMC"
+  numberOfRealAlgebraicAliasVariables = "0"  cmt_numberOfRealAlgebraicAliasVariables = "NA:       number of alias variables,                          OMC"
+  numberOfRealParameters              = "6"  cmt_numberOfRealParameters              = "NP:       number of parameters,                               OMC"
+
+  numberOfIntegerAlgebraicVariables   = "0"  cmt_numberOfIntegerAlgebraicVariables   = "NYINT:    number of alg. int variables,                       OMC"
+  numberOfIntegerAliasVariables       = "0"  cmt_numberOfIntegerAliasVariables       = "NAINT:    number of alias int variables,                      OMC"
+  numberOfIntegerParameters           = "0"  cmt_numberOfIntegerParameters           = "NPINT:    number of int parameters,                           OMC"
+
+  numberOfStringAlgebraicVariables    = "0"  cmt_numberOfStringAlgebraicVariables    = "NYSTR:    number of alg. string variables,                    OMC"
+  numberOfStringAliasVariables        = "0"  cmt_numberOfStringAliasVariables        = "NASTR:    number of alias string variables,                   OMC"
+  numberOfStringParameters            = "0"  cmt_numberOfStringParameters            = "NPSTR:    number of string parameters,                        OMC"
+
+  numberOfBooleanAlgebraicVariables   = "0"  cmt_numberOfBooleanAlgebraicVariables   = "NYBOOL:   number of alg. bool variables,                      OMC"
+  numberOfBooleanAliasVariables       = "0"  cmt_numberOfBooleanAliasVariables       = "NABOOL:   number of alias bool variables,                     OMC"
+  numberOfBooleanParameters           = "0"  cmt_numberOfBooleanParameters           = "NPBOOL:   number of bool parameters,                          OMC" >
+
+
+  <!-- startTime, stopTime, tolerance are FMI specific, all others are OMC specific -->
+  <DefaultExperiment
+    startTime      = "0"
+    stopTime       = "600"
+    stepSize       = "3"
+    tolerance      = "1e-06"
+    solver        = "dassl"
+    outputFormat      = "mat"
+    variableFilter      = ".*" />
+
+  <!-- variables in the model -->
+  <ModelVariables>
+
+  <ScalarVariable
+    name = "SOC"
+    valueReference = "1000"
+    variability = "continuous" isDiscrete = "false"
+    causality = "local" isValueChangeable = "false"
+    alias = "noAlias"
+    classIndex = "0" classType = "rSta"
+    isProtected = "false" hideResult = "" initNonlinear = "false"
+    fileName = "F:/Battery_Desktop/models/openmodelica/BatteryCell.mo" startLine = "15" startColumn = "3" endLine = "15" endColumn = "39" fileWritable = "true">
+    <Real fixed="true" useNominal="false" />
+  </ScalarVariable>
+  <ScalarVariable
+    name = "T_cell"
+    valueReference = "1001"
+    variability = "continuous" isDiscrete = "false"
+    causality = "local" isValueChangeable = "false"
+    alias = "noAlias"
+    classIndex = "1" classType = "rSta"
+    isProtected = "false" hideResult = "" initNonlinear = "false"
+    fileName = "F:/Battery_Desktop/models/openmodelica/BatteryCell.mo" startLine = "18" startColumn = "3" endLine = "18" endColumn = "39" fileWritable = "true">
+    <Real fixed="true" useNominal="false" />
+  </ScalarVariable>
+  <ScalarVariable
+    name = "V_p1"
+    valueReference = "1002"
+    variability = "continuous" isDiscrete = "false"
+    causality = "local" isValueChangeable = "true"
+    alias = "noAlias"
+    classIndex = "2" classType = "rSta"
+    isProtected = "false" hideResult = "" initNonlinear = "false"
+    fileName = "F:/Battery_Desktop/models/openmodelica/BatteryCell.mo" startLine = "20" startColumn = "3" endLine = "20" endColumn = "33" fileWritable = "true">
+    <Real start="0.0" fixed="true" useNominal="false" />
+  </ScalarVariable>
+  <ScalarVariable
+    name = "der(SOC)"
+    valueReference = "1003"
+    variability = "continuous" isDiscrete = "false"
+    causality = "local" isValueChangeable = "false"
+    alias = "noAlias"
+    classIndex = "0" classType = "rDer"
+    isProtected = "false" hideResult = "" initNonlinear = "false"
+    fileName = "F:/Battery_Desktop/models/openmodelica/BatteryCell.mo" startLine = "15" startColumn = "3" endLine = "15" endColumn = "39" fileWritable = "true">
+    <Real fixed="false" useNominal="false" />
+  </ScalarVariable>
+  <ScalarVariable
+    name = "der(T_cell)"
+    valueReference = "1004"
+    variability = "continuous" isDiscrete = "false"
+    causality = "local" isValueChangeable = "false"
+    alias = "noAlias"
+    classIndex = "1" classType = "rDer"
+    isProtected = "false" hideResult = "" initNonlinear = "false"
+    fileName = "F:/Battery_Desktop/models/openmodelica/BatteryCell.mo" startLine = "18" startColumn = "3" endLine = "18" endColumn = "39" fileWritable = "true">
+    <Real fixed="false" useNominal="false" />
+  </ScalarVariable>
+  <ScalarVariable
+    name = "der(V_p1)"
+    valueReference = "1005"
+    variability = "continuous" isDiscrete = "false"
+    causality = "local" isValueChangeable = "false"
+    alias = "noAlias"
+    classIndex = "2" classType = "rDer"
+    isProtected = "false" hideResult = "" initNonlinear = "false"
+    fileName = "F:/Battery_Desktop/models/openmodelica/BatteryCell.mo" startLine = "20" startColumn = "3" endLine = "20" endColumn = "33" fileWritable = "true">
+    <Real fixed="false" useNominal="false" />
+  </ScalarVariable>
+  <ScalarVariable
+    name = "I_load"
+    valueReference = "1006"
+    variability = "continuous" isDiscrete = "false"
+    causality = "input" isValueChangeable = "true"
+    inputIndex = "0"
+    alias = "noAlias"
+    classIndex = "0" classType = "rAlg"
+    isProtected = "false" hideResult = "" initNonlinear = "false"
+    fileName = "F:/Battery_Desktop/models/openmodelica/BatteryCell.mo" startLine = "12" startColumn = "3" endLine = "12" endColumn = "20" fileWritable = "true">
+    <Real fixed="true" useNominal="false" />
+  </ScalarVariable>
+  <ScalarVariable
+    name = "V_ocv"
+    valueReference = "1007"
+    variability = "continuous" isDiscrete = "false"
+    causality = "local" isValueChangeable = "false"
+    alias = "noAlias"
+    classIndex = "1" classType = "rAlg"
+    isProtected = "false" hideResult = "" initNonlinear = "false"
+    fileName = "F:/Battery_Desktop/models/openmodelica/BatteryCell.mo" startLine = "17" startColumn = "3" endLine = "17" endColumn = "13" fileWritable = "true">
+    <Real fixed="false" useNominal="false" />
+  </ScalarVariable>
+  <ScalarVariable
+    name = "V_terminal"
+    valueReference = "1008"
+    variability = "continuous" isDiscrete = "false"
+    causality = "local" isValueChangeable = "false"
+    alias = "noAlias"
+    classIndex = "2" classType = "rAlg"
+    isProtected = "false" hideResult = "" initNonlinear = "false"
+    fileName = "F:/Battery_Desktop/models/openmodelica/BatteryCell.mo" startLine = "16" startColumn = "3" endLine = "16" endColumn = "18" fileWritable = "true">
+    <Real fixed="false" useNominal="false" />
+  </ScalarVariable>
+  <ScalarVariable
+    name = "heat_gen"
+    valueReference = "1009"
+    variability = "continuous" isDiscrete = "false"
+    causality = "local" isValueChangeable = "false"
+    alias = "noAlias"
+    classIndex = "3" classType = "rAlg"
+    isProtected = "false" hideResult = "" initNonlinear = "false"
+    fileName = "F:/Battery_Desktop/models/openmodelica/BatteryCell.mo" startLine = "19" startColumn = "3" endLine = "19" endColumn = "16" fileWritable = "true">
+    <Real fixed="false" useNominal="false" />
+  </ScalarVariable>
+  <ScalarVariable
+    name = "C_thermal"
+    valueReference = "1010"
+    description = "Thermal Capacitance (J/K)"
+    variability = "parameter" isDiscrete = "true"
+    causality = "parameter" isValueChangeable = "true"
+    alias = "noAlias"
+    classIndex = "0" classType = "rPar"
+    isProtected = "false" hideResult = "" initNonlinear = "false"
+    fileName = "F:/Battery_Desktop/models/openmodelica/BatteryCell.mo" startLine = "6" startColumn = "3" endLine = "6" endColumn = "62" fileWritable = "true">
+    <Real start="1000.0" fixed="true" useNominal="false" />
+  </ScalarVariable>
+  <ScalarVariable
+    name = "R_internal"
+    valueReference = "1011"
+    description = "Ohmic Resistance"
+    variability = "parameter" isDiscrete = "true"
+    causality = "parameter" isValueChangeable = "true"
+    alias = "noAlias"
+    classIndex = "1" classType = "rPar"
+    isProtected = "false" hideResult = "" initNonlinear = "false"
+    fileName = "F:/Battery_Desktop/models/openmodelica/BatteryCell.mo" startLine = "5" startColumn = "3" endLine = "5" endColumn = "55" fileWritable = "true">
+    <Real start="0.003" fixed="true" useNominal="false" />
+  </ScalarVariable>
+  <ScalarVariable
+    name = "SOC_init"
+    valueReference = "1012"
+    description = "Initial SOC (0-1)"
+    variability = "parameter" isDiscrete = "true"
+    causality = "parameter" isValueChangeable = "true"
+    alias = "noAlias"
+    classIndex = "2" classType = "rPar"
+    isProtected = "false" hideResult = "" initNonlinear = "false"
+    fileName = "F:/Battery_Desktop/models/openmodelica/BatteryCell.mo" startLine = "9" startColumn = "3" endLine = "9" endColumn = "52" fileWritable = "true">
+    <Real start="0.9" fixed="true" useNominal="false" />
+  </ScalarVariable>
+  <ScalarVariable
+    name = "T_env"
+    valueReference = "1013"
+    description = "Environment Temperature (K)"
+    variability = "parameter" isDiscrete = "true"
+    causality = "parameter" isValueChangeable = "true"
+    alias = "noAlias"
+    classIndex = "3" classType = "rPar"
+    isProtected = "false" hideResult = "" initNonlinear = "false"
+    fileName = "F:/Battery_Desktop/models/openmodelica/BatteryCell.mo" startLine = "8" startColumn = "3" endLine = "8" endColumn = "62" fileWritable = "true">
+    <Real start="298.15" fixed="true" useNominal="false" />
+  </ScalarVariable>
+  <ScalarVariable
+    name = "capacity_Ah"
+    valueReference = "1014"
+    description = "Cell Capacity"
+    variability = "parameter" isDiscrete = "true"
+    causality = "parameter" isValueChangeable = "true"
+    alias = "noAlias"
+    classIndex = "4" classType = "rPar"
+    isProtected = "false" hideResult = "" initNonlinear = "false"
+    fileName = "F:/Battery_Desktop/models/openmodelica/BatteryCell.mo" startLine = "4" startColumn = "3" endLine = "4" endColumn = "51" fileWritable = "true">
+    <Real start="100.0" fixed="true" useNominal="false" />
+  </ScalarVariable>
+  <ScalarVariable
+    name = "h_conv"
+    valueReference = "1015"
+    description = "Convection Coefficient"
+    variability = "parameter" isDiscrete = "true"
+    causality = "parameter" isValueChangeable = "true"
+    alias = "noAlias"
+    classIndex = "5" classType = "rPar"
+    isProtected = "false" hideResult = "" initNonlinear = "false"
+    fileName = "F:/Battery_Desktop/models/openmodelica/BatteryCell.mo" startLine = "7" startColumn = "3" endLine = "7" endColumn = "53" fileWritable = "true">
+    <Real start="5.0" fixed="true" useNominal="false" />
+  </ScalarVariable>
+
+
+
+  </ModelVariables>
+
+
+</fmiModelDescription>
+
