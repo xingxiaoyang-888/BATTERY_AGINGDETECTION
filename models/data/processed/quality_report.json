@@ -1,0 +1,19 @@
+{
+  "timestamp": "2026-06-09T20:51:25.505340",
+  "original_shape": [
+    4000,
+    19
+  ],
+  "cells": 8,
+  "dropped_columns": [
+    "internal_resistance"
+  ],
+  "rejected_cells": [],
+  "outliers_replaced": 0,
+  "capacity_jumps": 0,
+  "final_shape": [
+    4000,
+    15
+  ],
+  "final_nan_count": 0
+}

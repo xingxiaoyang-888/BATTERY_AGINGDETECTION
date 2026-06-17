@@ -1,229 +1,306 @@
 # views/spatial_view.py
+import streamlit as st
 import plotly.graph_objects as go
 import numpy as np
+from models.data_structures import TimeSeriesData
 
-def render_3d_pack(t_max, t_min, series_num):
-    """
-    [View Component] 3D 电池模组空间孪生渲染器
-    """
-    # 1. 几何构建 (12列布局)
-    cols = 12
-    rows = int(np.ceil(series_num / cols))
-    
-    x_coords = []
-    y_coords = []
-    z_coords = []
-    temps = []
-    cell_ids = []
-    
-    # 2. 热场数据生成
-    center_x, center_y = (cols-1)/2, (rows-1)/2
-    max_dist = np.sqrt(center_x**2 + center_y**2)
-    
-    count = 1
-    for r in range(rows):
-        for c in range(cols):
-            if count > series_num: break
-            
-            x_coords.append(c)
-            y_coords.append(r)
-            z_coords.append(0)
-            cell_ids.append(f"Cell #{count} (M{r+1})") 
-            
-            # 模拟热梯度
-            dist = np.sqrt((c - center_x)**2 + (r - center_y)**2)
-            factor = 1 - (dist / (max_dist + 0.1)) 
-            cell_temp = t_min + (t_max - t_min) * (factor ** 1.5)
-            cell_temp += np.random.normal(0, 0.2)
-            temps.append(cell_temp)
-            count += 1
+# ── 工业配色 ──────────────────────────────────────
+CELL_GAP = 0.15          # 电芯间距
+CELL_W = 0.7             # 电芯宽度
+CELL_H = 1.6             # 电芯高度 (比例接近真实 18650/方形电芯)
+MODULE_GAP = 1.0         # 模组间距（每8串一组）
+COOLING_H = -0.5         # 冷板 Z 位置
 
-    # === [图层 1] 电芯实体 (Cells) ===
-    trace_cells = go.Scatter3d(
-        x=x_coords, y=y_coords, z=z_coords,
-        mode='markers',
-        marker=dict(
-            size=12,
-            color=temps,                
-            colorscale='Jet',
-            cmin=20, cmax=60,           # 锁定工业标准温度范围
-            opacity=0.9,
-            symbol='square',
-            colorbar=dict(
-                title=dict(text="Temp (°C)", font=dict(color='white')), 
-                x=0.85, 
-                tickfont=dict(color='white'),
-                len=0.8
-            )
-        ),
-        text=cell_ids, 
-        hovertemplate="<b>%{text}</b><br>Temp: %{marker.color:.1f}°C<br>Loc: [%{x}, %{y}]<extra></extra>"
-    )
-    
-    data = [trace_cells]
+COOLANT_COLOR = '#00bcd4'
+BUS_BAR_COLOR = '#b0bec5'
+CASING_COLOR = '#37474f'
+GRID_COLOR = '#263238'
 
-    # === [图层 2] 电池包外壳线框 (Wireframe Casing) ===
-    x_len = cols - 1
-    y_len = rows - 1
-    
-    x_box = [0, x_len, x_len, 0, 0, 0, x_len, x_len, 0, 0, x_len, x_len, x_len, x_len, 0, 0]
-    y_box = [0, 0, y_len, y_len, 0, 0, 0, y_len, y_len, 0, 0, y_len, y_len, 0, 0, y_len]
-    z_box = [-1, -1, -1, -1, -1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, 1]
-    
-    trace_case = go.Scatter3d(
-        x=x_box, y=y_box, z=z_box,
-        mode='lines',
-        line=dict(color='#00f2ff', width=3),
-        hoverinfo='skip',
-        name='Pack Casing'
-    )
-    data.append(trace_case)
 
-    # === [图层 3] 冷却流道标识 (Coolant Flow) ===
-    trace_inlet = go.Scatter3d(
-        x=[-1], y=[0], z=[0],
-        mode='text+markers',
-        marker=dict(symbol='diamond', size=10, color='#00e676'),
-        text=["💧 INLET"],
-        textfont=dict(color='#00e676', size=14), 
-        hoverinfo='skip'
-    )
-    trace_outlet = go.Scatter3d(
-        x=[x_len+1], y=[y_len], z=[0],
-        mode='text+markers',
-        marker=dict(symbol='diamond', size=10, color='#ff1744'),
-        text=["🔥 OUTLET"],
-        textfont=dict(color='#ff1744', size=14), 
-        hoverinfo='skip'
-    )
-    data.append(trace_inlet)
-    data.append(trace_outlet)
+def _build_cell_mesh(x, y, z, w, d, h):
+    """构建单个电芯的 3D 长方体网格顶点"""
+    ox, oy, oz = x - w/2, y - d/2, z
+    verts = [
+        [ox, oy, oz], [ox+w, oy, oz], [ox+w, oy+d, oz], [ox, oy+d, oz],  # 底面
+        [ox, oy, oz+h], [ox+w, oy, oz+h], [ox+w, oy+d, oz+h], [ox, oy+d, oz+h],  # 顶面
+    ]
+    faces = [
+        [0,1,2,3], [4,5,6,7],  # 底 / 顶
+        [0,1,5,4], [1,2,6,5],  # 前 / 右
+        [2,3,7,6], [3,0,4,7],  # 后 / 左
+    ]
+    x_face, y_face, z_face = [], [], []
+    for f in faces:
+        for v in f:
+            x_face.append(verts[v][0])
+            y_face.append(verts[v][1])
+            z_face.append(verts[v][2])
+        x_face.append(None); y_face.append(None); z_face.append(None)
+    return x_face, y_face, z_face
 
-    # 4. 布局优化
-    fig = go.Figure(data=data)
+
+def _add_colorbar_trace(fig, values, title, x_pos=0.85):
+    """不添加独立 trace，仅通过 marker 已绑定的 colorbar 工作"""
+    pass
+
+
+def render_3d_pack_thermal_view(ts_data: TimeSeriesData, Ns: int, Np: int):
+    """工业级 3D 电池包热场数字孪生 — 立体电芯 + 冷板 + 母线 + 外壳"""
+    st.subheader(" Battery Pack 3D Thermal Digital Twin")
+
+    if not ts_data.temp_matrix_frames:
+        st.info("请先启动解算以生成热场数据")
+        return
+
+    total_frames = len(ts_data.temp_matrix_frames)
+    selected_idx = st.slider("Timeline (s)", 0, total_frames - 1, total_frames - 1)
+    T = np.array(ts_data.temp_matrix_frames[selected_idx])
+
+    t_min, t_max = float(np.min(T)), float(np.max(T))
+    mid_temp = (t_min + t_max) / 2
+
+    traces = []
+
+    # ── 1. 电芯 3D 立体盒 ──
+    cell_x, cell_y, cell_z, cell_temps, cell_labels = [], [], [], [], []
+    for s in range(Ns):
+        module_idx = s // 8
+        x_offset = module_idx * MODULE_GAP
+        for p in range(Np):
+            cx = p * (CELL_W + CELL_GAP) + x_offset
+            cy = s * (CELL_W + CELL_GAP)
+            cell_temp = T[s, p]
+            cell_x.append(cx + CELL_W/2)
+            cell_y.append(cy + CELL_W/2)
+            cell_z.append(0)
+            cell_temps.append(cell_temp)
+            cell_labels.append(f"S{s+1}P{p+1}: {cell_temp:.1f}°C")
+
+            # 立体盒 — intensity 用于每顶点着色
+            xf, yf, zf = _build_cell_mesh(cx, cy, 0, CELL_W, CELL_W, CELL_H)
+            traces.append(go.Mesh3d(
+                x=xf, y=yf, z=zf,
+                intensity=[cell_temp]*len(xf),
+                colorscale='Turbo',
+                intensitymode='vertex',
+                cmin=t_min, cmax=t_max,
+                showscale=False,
+                hoverinfo='skip',
+            ))
+
+    # ── 2. 冷板（底部平面） ──
+    total_x = (Np * (CELL_W + CELL_GAP) - CELL_GAP) + (Ns // 8) * MODULE_GAP
+    total_y = Ns * (CELL_W + CELL_GAP) - CELL_GAP
+    cp_x = [-0.3, total_x + 0.3, total_x + 0.3, -0.3]
+    cp_y = [-0.3, -0.3, total_y + 0.3, total_y + 0.3]
+    cp_z = [COOLING_H]*4
+    traces.append(go.Mesh3d(
+        x=cp_x, y=cp_y, z=cp_z,
+        color=COOLANT_COLOR, opacity=0.15,
+        showscale=False, hoverinfo='skip', name='Cooling Plate'
+    ))
+
+    # ── 3. 母线排（连接并联电芯顶部） ──
+    for s in range(Ns):
+        module_idx = s // 8
+        x_off = module_idx * MODULE_GAP
+        for p in range(Np):
+            cx = p * (CELL_W + CELL_GAP) + x_off
+            cy = s * (CELL_W + CELL_GAP)
+            traces.append(go.Scatter3d(
+                x=[cx + CELL_W/2, cx + CELL_W/2],
+                y=[cy + CELL_W/2, cy + CELL_W/2],
+                z=[CELL_H, CELL_H + 0.3],
+                mode='lines', line=dict(color=BUS_BAR_COLOR, width=1),
+                hoverinfo='skip',
+            ))
+
+    # ── 4. 电芯温度标注点（顶部小球） ──
+    traces.append(go.Scatter3d(
+        x=cell_x, y=cell_y, z=[CELL_H + 0.3]*len(cell_x),
+        mode='markers+text',
+        marker=dict(size=6, color=cell_temps, colorscale='Turbo',
+                    cmin=t_min, cmax=t_max, colorbar=dict(
+                        title=dict(text="°C", font=dict(color='#ccc')),
+                        x=0.88, len=0.5, thickness=12,
+                        tickfont=dict(color='#ccc'),
+                    )),
+        text=[f"{t:.1f}°C" for t in cell_temps],
+        textfont=dict(size=9, color='white'),
+        textposition='top center',
+        hovertext=cell_labels,
+        hoverinfo='text',
+        name='Cells'
+    ))
+
+    # ── 5. 外壳线框 ──
+    case_x = [-0.5, total_x + 0.5, total_x + 0.5, -0.5, -0.5,
+              -0.5, total_x + 0.5, total_x + 0.5, -0.5, -0.5,
+              total_x + 0.5, total_x + 0.5, total_x + 0.5, total_x + 0.5, -0.5, -0.5]
+    case_y = [-0.5, -0.5, total_y + 0.5, total_y + 0.5, -0.5,
+              -0.5, -0.5, total_y + 0.5, total_y + 0.5, -0.5,
+              -0.5, total_y + 0.5, total_y + 0.5, -0.5, -0.5, total_y + 0.5]
+    case_z = [COOLING_H - 0.15, COOLING_H - 0.15, COOLING_H - 0.15, COOLING_H - 0.15, COOLING_H - 0.15,
+              CELL_H + 0.8, CELL_H + 0.8, CELL_H + 0.8, CELL_H + 0.8, CELL_H + 0.8,
+              CELL_H + 0.8, CELL_H + 0.8, COOLING_H - 0.15, COOLING_H - 0.15, COOLING_H - 0.15, CELL_H + 0.8]
+    traces.append(go.Scatter3d(
+        x=case_x, y=case_y, z=case_z, mode='lines',
+        line=dict(color=CASING_COLOR, width=2), name='Pack Casing', hoverinfo='skip'
+    ))
+
+    # ── 冷却液流向箭头 ──
+    mid_y = total_y / 2
+    traces.append(go.Scatter3d(
+        x=[-0.6], y=[-0.6], z=[COOLING_H],
+        mode='markers+text',
+        marker=dict(size=8, symbol='diamond', color='#00e676'),
+        text=["INLET"], textfont=dict(color='#00e676', size=11),
+        hoverinfo='skip', name='Coolant In'
+    ))
+    traces.append(go.Scatter3d(
+        x=[total_x + 0.6], y=[total_y + 0.6], z=[COOLING_H],
+        mode='markers+text',
+        marker=dict(size=8, symbol='diamond', color='#ff5252'),
+        text=["OUTLET"], textfont=dict(color='#ff5252', size=11),
+        hoverinfo='skip', name='Coolant Out'
+    ))
+
+    fig = go.Figure(data=traces)
     fig.update_layout(
-        title=dict(text="🔋 Digital Twin Spatial View (Pack #01)", y=0.9),
-        scene=dict(
-            xaxis=dict(visible=False, showspikes=False),
-            yaxis=dict(visible=False, showspikes=False),
-            zaxis=dict(visible=False, showspikes=False),
-            bgcolor='rgba(0,0,0,0)',
-            aspectmode='data' 
-        ),
-        template="plotly_dark",
+        template='plotly_dark',
         paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
         margin=dict(l=0, r=0, t=30, b=0),
-        font=dict(color="#ffffff"),
-        title_font=dict(color="#ffffff"),
-        showlegend=False
-    )
-    
-    fig.add_annotation(
-        x=0.05, y=0.05, showarrow=False,
-        text="Front (Connector Side)", font=dict(color="#00f2ff", size=10),
-        xref="paper", yref="paper"
-    )
-    
-    return fig
-
-def render_3d_aging_map(avg_loss, series_num):
-    """
-    [新增] 3D SOH 损耗分布图 (SOH Spatial Distribution)
-    原理：利用热梯度模拟不均匀老化 (中间热->老化快，边缘冷->老化慢)
-    """
-    # 1. 几何构建
-    cols = 12
-    rows = int(np.ceil(series_num / cols))
-    
-    x_coords = []
-    y_coords = []
-    z_coords = []
-    aging_factors = [] # 相对老化因子
-    cell_ids = []
-    
-    # 2. 模拟不均匀老化场
-    # 假设中心电芯老化速度是平均值的 1.2 倍，边缘是 0.8 倍
-    center_x, center_y = (cols-1)/2, (rows-1)/2
-    max_dist = np.sqrt(center_x**2 + center_y**2)
-    
-    count = 1
-    for r in range(rows):
-        for c in range(cols):
-            if count > series_num: break
-            
-            x_coords.append(c)
-            y_coords.append(r)
-            z_coords.append(0)
-            cell_ids.append(f"Cell #{count}")
-            
-            # 计算距离中心的归一化距离
-            dist = np.sqrt((c - center_x)**2 + (r - center_y)**2)
-            dist_norm = 1 - (dist / (max_dist + 0.1)) # 0(边缘) -> 1(中心)
-            
-            # 老化因子：中心老化快(Red)，边缘老化慢(Green)
-            # base_loss * (0.8 ~ 1.2)
-            factor = 0.8 + (0.4 * dist_norm**1.5) 
-            aging_factors.append(factor)
-            count += 1
-
-    # 3. 渲染
-    # 颜色映射：Green (低损耗) -> Red (高损耗)
-    trace = go.Scatter3d(
-        x=x_coords, y=y_coords, z=z_coords,
-        mode='markers',
-        marker=dict(
-            size=12,
-            symbol='square',
-            color=aging_factors,
-            colorscale='RdYlGn_r', # 翻转红绿轴：红=高损耗(Bad), 绿=低损耗(Good)
-            opacity=0.9,
-            colorbar=dict(
-                # [关键修改] 增强字体可视性：亮白、加粗、加大
-                title=dict(text="Aging Rate", font=dict(color='#ffffff', size=14, family="Arial Black")), 
-                x=0.9, 
-                tickfont=dict(color='#ffffff', size=12, family="Arial"), 
-                len=0.8,
-                tickvals=[0.8, 1.0, 1.2],
-                ticktext=["Slow", "Avg", "Fast"]
-            )
+        title=dict(
+            text=f"Max: {t_max:.1f}°C  |  Min: {t_min:.1f}°C  |  ΔT: {t_max - t_min:.2f}°C",
+            font=dict(color='#ccc', size=14)
         ),
-        text=cell_ids,
-        hovertemplate="<b>%{text}</b><br>Aging Rate: x%{marker.color:.2f}<br>(Relative to Avg)<extra></extra>"
-    )
-    
-    # 4. 线框外壳 (复用之前的逻辑)
-    x_len, y_len = cols - 1, rows - 1
-    x_box = [0, x_len, x_len, 0, 0, 0, x_len, x_len, 0, 0, x_len, x_len, x_len, x_len, 0, 0]
-    y_box = [0, 0, y_len, y_len, 0, 0, 0, y_len, y_len, 0, 0, y_len, y_len, 0, 0, y_len]
-    z_box = [-1, -1, -1, -1, -1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, 1]
-    
-    trace_case = go.Scatter3d(
-        x=x_box, y=y_box, z=z_box,
-        mode='lines',
-        line=dict(color='#ffab00', width=2), # 使用橙色区分于热力图
-        hoverinfo='skip'
-    )
-
-    fig = go.Figure(data=[trace, trace_case])
-    fig.update_layout(
-        # [关键修改] 增强标题字体可视性
-        title=dict(text="🔋 SOH 不均匀分布云图 (Non-uniform Aging)", y=0.9, font=dict(size=16, color='#ffffff')),
         scene=dict(
-            xaxis=dict(visible=False), yaxis=dict(visible=False), zaxis=dict(visible=False),
-            bgcolor='rgba(0,0,0,0)', aspectmode='data'
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+            zaxis=dict(visible=False, range=[COOLING_H - 0.5, CELL_H + 1.2]),
+            bgcolor='rgba(0,0,0,0)',
+            camera=dict(eye=dict(x=1.8, y=1.8, z=1.2)),
+            aspectmode='data',
         ),
-        template="plotly_dark",
-        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+        showlegend=False,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(f"Frame {selected_idx+1}/{total_frames}  |  {Ns}×{Np} cells  |  "
+               f"Coolant: {COOLANT_COLOR} inlet → outlet")
+
+
+def render_3d_aging_map_view(soh_matrix, Ns: int, Np: int):
+    """工业级 SOH 空间分布 — 立体电芯 + 最差电芯高亮"""
+    st.subheader(" SOH Health Distribution Map")
+
+    if soh_matrix is None or len(soh_matrix) == 0:
+        st.info("SOH 空间数据不可用，请使用新版 FMU")
+        return
+
+    S = np.array(soh_matrix) * 100  # → 百分比
+    soh_min, soh_max = float(np.min(S)), float(np.max(S))
+
+    traces = []
+    cell_labels = []
+
+    # ── 电芯立体盒 ──
+    for s in range(Ns):
+        module_idx = s // 8
+        x_off = module_idx * MODULE_GAP
+        for p in range(Np):
+            cx = p * (CELL_W + CELL_GAP) + x_off
+            cy = s * (CELL_W + CELL_GAP)
+            val = S[s, p]
+            cell_labels.append(f"S{s+1}P{p+1}: SOH {val:.2f}%")
+
+            xf, yf, zf = _build_cell_mesh(cx, cy, 0, CELL_W, CELL_W, CELL_H * 0.7)
+            traces.append(go.Mesh3d(
+                x=xf, y=yf, z=zf,
+                intensity=[val]*len(xf),
+                colorscale='RdYlGn',
+                intensitymode='vertex',
+                cmin=soh_min, cmax=soh_max,
+                showscale=False,
+                hoverinfo='skip',
+            ))
+
+    # ── 顶部小球（带色标） ──
+    cell_x, cell_y, cell_z_vals, cell_soh = [], [], [], []
+    worst_idx = np.unravel_index(np.argmin(S), S.shape)
+    for s in range(Ns):
+        module_idx = s // 8
+        x_off = module_idx * MODULE_GAP
+        for p in range(Np):
+            cell_x.append(p * (CELL_W + CELL_GAP) + CELL_W/2 + x_off)
+            cell_y.append(s * (CELL_W + CELL_GAP) + CELL_W/2)
+            cell_z_vals.append(CELL_H * 0.7 + 0.15)
+            cell_soh.append(S[s, p])
+
+    traces.append(go.Scatter3d(
+        x=cell_x, y=cell_y, z=cell_z_vals,
+        mode='markers+text',
+        marker=dict(size=5, color=cell_soh, colorscale='RdYlGn',
+                    cmin=soh_min, cmax=soh_max,
+                    colorbar=dict(
+                        title=dict(text="SOH %", font=dict(color='#ccc')),
+                        x=0.88, len=0.5, thickness=12,
+                        tickfont=dict(color='#ccc'),
+                        tickformat='.1f',
+                    )),
+        text=[f"{v:.2f}%" for v in cell_soh],
+        textfont=dict(size=8, color='white'),
+        textposition='top center',
+        hovertext=cell_labels,
+        hoverinfo='text',
+        name='SOH'
+    ))
+
+    # ── 最差电芯高亮 ──
+    ws, wp = worst_idx
+    w_x = wp * (CELL_W + CELL_GAP) + CELL_W/2 + (ws // 8) * MODULE_GAP
+    w_y = ws * (CELL_W + CELL_GAP) + CELL_W/2
+    # 红色闪烁边框
+    for dz in np.linspace(0, CELL_H * 0.7, 4):
+        ring = np.linspace(0, 2*np.pi, 20)
+        traces.append(go.Scatter3d(
+            x=[w_x + 0.5*np.cos(a) for a in ring],
+            y=[w_y + 0.5*np.sin(a) for a in ring],
+            z=[dz]*20, mode='lines',
+            line=dict(color='#ff1744', width=2),
+            hoverinfo='skip', name='Worst Cell'
+        ))
+
+    # ── 底部基座 ──
+    total_x = (Np * (CELL_W + CELL_GAP) - CELL_GAP) + (Ns // 8) * MODULE_GAP
+    total_y = Ns * (CELL_W + CELL_GAP) - CELL_GAP
+    base_z = [-0.2]*4
+    traces.append(go.Mesh3d(
+        x=[-0.3, total_x+0.3, total_x+0.3, -0.3],
+        y=[-0.3, -0.3, total_y+0.3, total_y+0.3],
+        z=base_z, color=GRID_COLOR, opacity=0.3,
+        showscale=False, hoverinfo='skip', name='Base'
+    ))
+
+    fig = go.Figure(data=traces)
+    fig.update_layout(
+        template='plotly_dark',
+        paper_bgcolor='rgba(0,0,0,0)',
         margin=dict(l=0, r=0, t=30, b=0),
-        font=dict(color="#ffffff"),
-        showlegend=False
+        title=dict(
+            text=f"SOH Range: {soh_min:.2f}% ~ {soh_max:.2f}%  |  "
+                 f"Worst: S{ws+1}P{wp+1} ({S[ws,wp]:.2f}%)",
+            font=dict(color='#ccc', size=14)
+        ),
+        scene=dict(
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+            zaxis=dict(visible=False),
+            bgcolor='rgba(0,0,0,0)',
+            camera=dict(eye=dict(x=1.5, y=1.5, z=1.0)),
+            aspectmode='data',
+        ),
+        showlegend=False,
     )
-    # 标注木桶效应
-    fig.add_annotation(
-        x=0.5, y=0.05, showarrow=False,
-        text="⚠️ Red cells determine the Pack Lifetime (Barrel Effect)",
-        font=dict(color="#ffab00", size=12, weight="bold"), xref="paper", yref="paper"
-    )
-    
-    return fig
+    st.plotly_chart(fig, use_container_width=True)
+    st.error(f" Worst Cell: S{ws+1}P{wp+1} (SOH={S[ws,wp]:.2f}%) "
+             f"— This cell dictates the entire pack End-of-Life.")

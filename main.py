@@ -38,13 +38,24 @@ def login_page():
     with col2:
         st.markdown("<br><br><br>", unsafe_allow_html=True)
         
-        # 🎯 标题区 (保留您喜欢的蓝色标题)
-        st.markdown("<h1 style='text-align: center; color: #00f2ff;'>🔋 BATTERY TWIN SYSTEM</h1>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align: center; color: #ccc;'>动力电池全生命周期数字孪生平台</p>", unsafe_allow_html=True)
+        #  标题区 (保留您喜欢的蓝色标题)
+        st.markdown("""
+        <div style="text-align:center;margin:20px 0 30px 0;">
+            <h1 style="font-size:30px;font-weight:700;color:#00f2ff;margin:0;letter-spacing:2px;">
+            Sodium-Ion Battery Digital Twin
+            </h1>
+            <p style="color:#5a6a80;font-size:13px;margin-top:6px;">
+            Industrial Electro-Thermal-Aging Simulation Platform
+            </p>
+            <p style="color:#3a4a60;font-size:11px;">
+            Powered by OpenModelica FMI 2.0 · Multi-FMU Architecture
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
         st.markdown("---")
         
         # 使用 Tabs 切换登录/注册 (这是最优雅的方式，不破坏您的布局)
-        tab_login, tab_reg = st.tabs(["🚀 登录系统 (Login)", "📝 注册新账户 (Register)"])
+        tab_login, tab_reg = st.tabs([" 登录系统 (Login)", " 注册新账户 (Register)"])
         
         # === 登录 Tab ===
         with tab_login:
@@ -58,13 +69,13 @@ def login_page():
                 if submitted:
                     # [修改点] 调用数据库验证
                     if verify_user(u, p):
-                        st.success("✅ 身份验证通过")
+                        st.success(" 身份验证通过")
                         time.sleep(0.5)
                         st.session_state['logged_in'] = True
                         st.session_state['username'] = u # 记录用户名用于显示头像
                         st.rerun()
                     else:
-                        st.error("❌ 账号或密码错误 (请重试或注册)")
+                        st.error(" 账号或密码错误 (请重试或注册)")
 
         # === 注册 Tab (新增) ===
         with tab_reg:
@@ -79,11 +90,11 @@ def login_page():
                         # [修改点] 调用数据库注册
                         success, msg = register_user(new_u, new_p)
                         if success:
-                            st.success(f"✅ 用户 {new_u} 注册成功！请切换到登录页登录。")
+                            st.success(f" 用户 {new_u} 注册成功！请切换到登录页登录。")
                         else:
-                            st.error(f"❌ {msg}")
+                            st.error(f" {msg}")
                     else:
-                        st.warning("⚠️ 请填写完整信息")
+                        st.warning(" 请填写完整信息")
 
         st.markdown("<br><p style='text-align: center; color: #555; font-size: 12px;'>Powered by OpenModelica & Python | Industrial Edition</p>", unsafe_allow_html=True)
 

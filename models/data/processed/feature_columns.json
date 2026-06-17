@@ -1,0 +1,12 @@
+[
+  "soh",
+  "cumulative_ah_throughput",
+  "coulombic_efficiency",
+  "temperature_c",
+  "c_rate_charge",
+  "c_rate_discharge",
+  "rest_time_h",
+  "soc_min",
+  "soc_max",
+  "soc_mean"
+]

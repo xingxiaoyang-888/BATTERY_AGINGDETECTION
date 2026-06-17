@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Any
 from datetime import datetime
+import numpy as np
 
 @dataclass
 class BatteryBOM:
@@ -39,6 +40,14 @@ class SimulationConfig:
     cooling_type: str = "Liquid Cooling" # 热管理策略
     init_soc: float = 90.0            # 初始荷电状态
     init_soh: float = 100.0           # 初始健康状态
+    
+    # Pack 拓扑与故障注入参数
+    series_num: int = 8               # Ns (串联数)
+    parallel_num: int = 2             # Np (并联数)
+    fault_mode: int = 1               # 1:无故障, 2:软内短路, 3:接触电阻增大, 4:初始容量异常, 5:内阻异常, 6:冷却失效
+    fault_s_index: int = 3            # 故障所在串联位置
+    fault_p_index: int = 1            # 故障所在并联位置
+    fault_severity: float = 0.8       # 故障严重度 (0.0 ~ 1.0)
     
     # 高级求解器参数 (可作为预留接口增加代码量)
     solver_method: str = "dassl"
@@ -83,10 +92,25 @@ class TimeSeriesData:
     temperatures_min: List[float] = field(default_factory=list)
     soc_array: List[float] = field(default_factory=list)
     
-    def add_step(self, t, v, i, t_max, t_min, soc):
+    # 空间矩阵 [时间帧, Ns, Np]
+    temp_matrix_frames: List[List[List[float]]] = field(default_factory=list)
+    soc_matrix_frames:  List[List[List[float]]] = field(default_factory=list)
+    soh_matrix_frames:  List[List[List[float]]] = field(default_factory=list)
+
+    def add_step(self, t: float, v: float, i: float, t_max: float, t_min: float, soc: float,
+                 temp_matrix: Optional[List[List[float]]] = None,
+                 soc_matrix: Optional[List[List[float]]] = None,
+                 soh_matrix: Optional[List[List[float]]] = None):
         self.timestamps.append(t)
         self.voltages.append(v)
         self.currents.append(i)
         self.temperatures_max.append(t_max)
         self.temperatures_min.append(t_min)
         self.soc_array.append(soc)
+
+        if temp_matrix is not None:
+            self.temp_matrix_frames.append(temp_matrix)
+        if soc_matrix is not None:
+            self.soc_matrix_frames.append(soc_matrix)
+        if soh_matrix is not None:
+            self.soh_matrix_frames.append(soh_matrix)

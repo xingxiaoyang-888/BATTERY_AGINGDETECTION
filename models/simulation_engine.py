@@ -2,317 +2,165 @@
 import numpy as np
 import pandas as pd
 import os
-import time
-import joblib 
+import logging
+import joblib
 
-# 导入独立的工业级老化算法模块
+# 导入底层驱动与数据协议 
+from utils.fmu_interface import FMUClient
 from models.aging_algorithm import AgingModel
+from models.data_structures import SimulationConfig, KPIResult, TimeSeriesData
+logger = logging.getLogger(__name__)
 
 class BatteryDigitalTwin:
     """
-     动力电池数字孪生引擎 V1.0 (OMC + Aging + AI Hybrid Model)
-    
-    架构特性:
-    1. 物理层: OpenModelica (OMC) 处理电-热耦合。
-    2. 数据层: 引入机器学习 (RandomForest) 预测非线性产热特征。
-    3. 寿命层: Python (AgingModel) 处理日历与循环老化闭环。
-    4. 策略层: 动态 SOP 与安全状态机。
+    动力电池数字孪生引擎最终版 (FMI物理引擎 + AI补偿 + 寿命闭环)
+    适配：钠离子电池体系 (Na-Ion)
     """
-    def __init__(self, cell_capacity_ah=100.0, cell_resistance_ohm=0.003, series_num=96, parallel_num=1):
-        # === 基础 BOM 参数 ===
-        self.cell_capacity = cell_capacity_ah
-        self.base_resistance = cell_resistance_ohm
-        self.series_num = series_num
-        self.parallel_num = parallel_num
+    def __init__(self, fmu_path: str, ai_model_path: str = None):
+        # 1. 挂载 FMI 物理心脏 
+        if not os.path.exists(fmu_path):
+            raise FileNotFoundError(f"找不到 FMU 模型文件: {fmu_path}")
+        self.fmu_engine = FMUClient(fmu_path)
         
-        # Pack 级衍生参数
-        self.pack_capacity = self.cell_capacity * self.parallel_num
-        self.pack_energy_kwh = (self.pack_capacity * 3.7 * self.series_num) / 1000.0
-        
-        # === AI 模型初始化 ===
-        self.ai_heat_model = None
-        self._load_ai_model()
-
-        # === 引擎初始化状态 ===
-        self.use_omc = False
-        self.omc = None
-        self._init_openmodelica()
-
-    def _load_ai_model(self):
-        """[新增] 尝试加载训练好的 AI 产热模型"""
-        try:
-            model_path = os.path.join(os.getcwd(), 'models', 'weights', 'heat_ai_model.pkl')
-            if os.path.exists(model_path):
-                self.ai_heat_model = joblib.load(model_path)
-                print("🤖 AI 产热模型 (Data-Driven) 加载成功！")
-            else:
-                print("ℹ️ 未找到 AI 产热模型，将使用机理物理公式计算产热。")
-        except Exception as e:
-            print(f"⚠️ AI 模型加载异常: {e}")
-
-    def _init_openmodelica(self):
-        """尝试建立与 OpenModelica 的 ZMQ 通信"""
-        try:
-            from OMPython import OMCSessionZMQ
-            self.omc = OMCSessionZMQ()
-            
-            # 加载 package.mo
-            current_dir = os.getcwd()
-            pkg_path = os.path.join(current_dir, "models", "BatterySystem", "package.mo")
-            pkg_path = pkg_path.replace("\\", "/")
-            
-            if not os.path.exists(pkg_path):
-                print(f"⚠️ 关键文件缺失: {pkg_path}")
-                self.use_omc = False
-                return
-                
-            load_status = self.omc.sendExpression(f'loadFile("{pkg_path}")')
-            classes = self.omc.sendExpression("getClassNames()")
-            
-            if not load_status or "BatterySystem" not in str(classes):
-                base_path = os.path.dirname(pkg_path).replace("\\", "/")
-                self.omc.sendExpression(f'loadFile("{base_path}/CoolingSystem.mo")')
-                self.omc.sendExpression(f'loadFile("{base_path}/BatteryCell.mo")')
-                
-            self.use_omc = True
-            print("✅ OpenModelica 工业级内核已就绪 (BatterySystem Loaded)")
-                
-        except Exception as e:
-            print(f"⚠️ OMC 连接异常: {e}")
-            self.use_omc = False
-
-    # ==========================================
-    # 核心入口: 运行工况 (带熔断机制)
-    # ==========================================
-    def run_profile(self, time_total, pack_current_a, env_temp_c, init_soc, init_soh, cooling_type):
-        self.pack_capacity = self.cell_capacity * self.parallel_num
-        
-        if self.use_omc:
+        # 2. 挂载 AI 权重文件 (用于非线性发热补偿或物理引擎失效容灾)
+        self.ai_compensator = None
+        if ai_model_path and os.path.exists(ai_model_path):
             try:
-                return self._run_with_openmodelica(time_total, pack_current_a, env_temp_c, init_soc, init_soh, cooling_type)
+                self.ai_compensator = joblib.load(ai_model_path)
+                logger.info(" 成功加载 AI 混合驱动权重")
             except Exception as e:
-                print(f"🔴 仿真中断: {e}")
-                self.use_omc = False # 熔断降级
-                return self._run_with_python_surrogate(time_total, pack_current_a, env_temp_c, init_soc, init_soh, cooling_type)
-        else:
-            return self._run_with_python_surrogate(time_total, pack_current_a, env_temp_c, init_soc, init_soh, cooling_type)
+                logger.error(f" 加载 AI 模型失败: {e}")
 
-    # ==========================================
-    # 核心 A: OpenModelica 驱动逻辑
-    # ==========================================
-    def _run_with_openmodelica(self, duration, current, temp, soc, init_soh, cooling):
-        mode_map = {"Natural": 1, "Air Cooling": 2, "Liquid Cooling": 3, "Liquid Heating": 4, "Immersion": 3}
-        c_mode = mode_map.get(cooling, 1)
+    def run_profile(self, config: SimulationConfig):
+        """
+        执行全流程解算：物理仿真 -> AI 修正 -> 寿命评估 -> KPI 聚合 
+        """
+        # --- A. 物理引擎解算 ---
+        # 注入信号：FMU 唯一运行时输入是 I_load_external
+        # 故障参数为编译时固定，需重新导出 FMU 才能改变
+        fmu_inputs = {
+            'I_load_external': config.pack_current_a,
+        }
         
-        i_cell = current / self.parallel_num
-        
-        sim_cmd = (
-            f"simulate(BatterySystem.BatteryCell, stopTime={duration}, numberOfIntervals=200, "
-            f"simflags=\"-override I_load={i_cell},T_env_input={temp+273.15},SOC_init={soc/100},cooling_mode={c_mode}\")"
+        # 执行联合仿真（Ns/Np 由 FMU 内部自动检测）
+        df_raw, temp_matrix_3d, soc_matrix_3d, soh_matrix_3d = self.fmu_engine.run_simulation(
+            stop_time=config.sim_duration_s,
+            inputs=fmu_inputs,
         )
         
-        self.omc.sendExpression(sim_cmd)
+        if df_raw is None or df_raw.empty:
+            raise RuntimeError("仿真解算异常：FMU 未返回有效数据")
+
+        # --- B. NaN 数值保护与降级容灾 ---
+        if df_raw.isnull().any().any():
+            nan_cols = df_raw.columns[df_raw.isnull().any()].tolist()
+            logger.warning(f"检测到 NaN 列: {nan_cols}，执行前向填充降级...")
+            # 策略：用前一个有效值填充（forward fill），保持物理连续性
+            df_raw = df_raw.ffill().bfill()
+            # 二次检查：如果整个列全是 NaN，填入安全默认值
+            for col in df_raw.columns:
+                if df_raw[col].isnull().any():
+                    if 'T_' in col:
+                        df_raw[col] = df_raw[col].fillna(config.env_temp_c + 273.15)
+                    elif 'SOC' in col:
+                        df_raw[col] = df_raw[col].fillna(config.init_soc / 100.0)
+                    elif 'V_' in col:
+                        df_raw[col] = df_raw[col].fillna(3.1 * config.series_num)
+                    elif 'I_' in col:
+                        df_raw[col] = df_raw[col].fillna(0.0)
+                    else:
+                        df_raw[col] = df_raw[col].fillna(0.0)
+            logger.info("NaN 降级处理完成，仿真可继续。")
+            # 相应的空间矩阵也需要做 NaN 处理
+            for frames, fallback in [(temp_matrix_3d, config.env_temp_c),
+                                      (soc_matrix_3d, config.init_soc / 100.0),
+                                      (soh_matrix_3d, config.init_soh / 100.0)]:
+                if frames:
+                    for frame in frames:
+                        for s in range(len(frame)):
+                            for p in range(len(frame[s])):
+                                if np.isnan(frame[s][p]):
+                                    frame[s][p] = fallback
+
+        # --- C. 寿命损耗计算 ---
+        # 提取全过程平均参数进行累计损伤评估
+        avg_temp_c = df_raw['pack.T_max'].mean() - 273.15
+        avg_current = config.pack_current_a
         
-        raw_time = self.omc.sendExpression("val(time)")
-        raw_v = self.omc.sendExpression("val(V_terminal)")
+        # 调用 NREL 衰减模型
+        step_loss = AgingModel.calculate_step_loss(
+            temp_c=avg_temp_c,
+            current_a=avg_current,
+            soc_pct=config.init_soc,
+            dt_seconds=config.sim_duration_s,
+            cell_capacity_ah=50.0 # 适配 SodiumIonBattery.mo 标定值
+        )
+        final_soh = max(0.0, config.init_soh - step_loss * 100)
+
+        # --- D. SOP 功率边界计算 (保留 V1.0 的严谨性并适配钠电)  ---
+        final_v = df_raw['pack.V_pack'].iloc[-1]
+        final_soc = df_raw['pack.SOC_min'].iloc[-1] * 100
+        max_temp_c = df_raw['pack.T_max'].max() - 273.15
         
-        if raw_time is None or raw_v is None:
-            raise RuntimeError(f"OMC 无数据返回: {self.omc.sendExpression('getErrorString()')}")
-            
-        times = np.array(raw_time)
-        v_cell = np.array(raw_v)
-        t_cell_k = np.array(self.omc.sendExpression("val(T_cell)"))
-        soc_res = np.array(self.omc.sendExpression("val(SOC)"))
+        # 钠离子电池动态内阻估算（使用 FMU 内部实际维度）
+        Ns_fmu = self.fmu_engine.Ns
+        Np_fmu = self.fmu_engine.Np
+        r_total = 0.003 * Ns_fmu / Np_fmu
+        p_dch_peak, p_chg_peak = self._calculate_sop_logic(
+            final_v, r_total, max_temp_c, final_soc / 100.0, Ns_fmu
+        )
+
+        # --- E. 结果装箱与时序封装 ---
+        kpis = KPIResult(
+            final_soc=final_soc,
+            final_soh=final_soh,
+            soh_loss_ppm=step_loss * 1e6,
+            max_temp_c=max_temp_c,
+            avg_delta_t=max_temp_c - config.env_temp_c,
+            max_discharge_power_kw=p_dch_peak / 1000.0,
+            max_charge_power_kw=p_chg_peak / 1000.0
+        )
         
-        v_pack = v_cell * self.series_num
-        t_cell_c = t_cell_k - 273.15
-        
-        grad_factor = 0.05
-        if c_mode == 3: grad_factor = 0.2
-        if c_mode == 2: grad_factor = 0.1
-        
-        delta_t_arr = t_cell_c * grad_factor * (abs(current)/100)
-        t_max = t_cell_c + delta_t_arr/2
-        t_min = t_cell_c - delta_t_arr/2
-        
-        sop_chg, sop_dch = [], []
-        for v, t, s in zip(v_pack, t_max, soc_res):
-             p_d, _, p_c = self._calculate_sop_logic(v, self.base_resistance*self.series_num/self.parallel_num, t, s)
-             sop_chg.append(abs(p_c))
-             sop_dch.append(abs(p_d))
-             
-        # 集成 AgingModel 计算 SOH
-        current_soh = init_soh
-        soh_arr = []
-        total_loss = 0.0
-        dt_list = np.diff(times, prepend=0)
-        
-        for i in range(len(times)):
-            step_loss = AgingModel.calculate_step_loss(
-                temp_c=t_max[i], 
-                current_a=i_cell, 
-                soc_pct=soc_res[i]*100, 
-                dt_seconds=dt_list[i], 
-                cell_capacity_ah=self.cell_capacity
+        # 触发告警状态机
+        if max_temp_c > 50.0: kpis.diagnostic_warnings.append(" 严重热失控风险：电芯温度超标")
+        if final_soc < 5.0: kpis.diagnostic_warnings.append(" 低电量预警：请及时充电")
+
+        # 封装时序对象
+        ts_data = TimeSeriesData()
+        for i in range(len(df_raw)):
+            ts_data.add_step(
+                t=df_raw['time'].iloc[i],
+                v=df_raw['pack.V_pack'].iloc[i],
+                i=df_raw['pack.I_pack'].iloc[i],
+                t_max=df_raw['pack.T_max'].iloc[i] - 273.15,
+                t_min=df_raw['pack.T_min'].iloc[i] - 273.15,
+                soc=df_raw['pack.SOC_min'].iloc[i] * 100,
+                temp_matrix=temp_matrix_3d[i],
+                soc_matrix=soc_matrix_3d[i] if soc_matrix_3d else None,
+                soh_matrix=soh_matrix_3d[i] if soh_matrix_3d else None,
             )
-            total_loss += step_loss
-            current_soh -= step_loss
-            soh_arr.append(current_soh)
-        
-        df = pd.DataFrame({
-            "Time": times, "Pack_Voltage": v_pack, "Pack_Current": [current] * len(times),
-            "SOC": soc_res * 100, "SOH": soh_arr,
-            "Max_Temp": t_max, "Min_Temp": t_min, "Delta_T": delta_t_arr,
-            "SOP_Charge_kW": np.array(sop_chg)/1000, "SOP_Discharge_kW": np.array(sop_dch)/1000
-        })
-        
-        kpis = self._generate_kpis(df, soc, init_soh, total_loss)
-        return df, kpis
 
-    # ==========================================
-    # 核心 B: Python 高保真代理模型 (AI Enhanced)
-    # ==========================================
-    def _run_with_python_surrogate(self, time_total, pack_current_a, env_temp_c, init_soc_pct, init_soh_pct, cooling_type):
-        steps = 200
-        dt = time_total / steps
-        t_arr = np.linspace(0, time_total, steps)
-        
-        current_soc = init_soc_pct / 100.0
-        current_soh = init_soh_pct / 100.0
-        temp_core = env_temp_c
-        temp_surface = env_temp_c
-        
-        h_cooling_map = {"Natural": 0.5, "Air Cooling": 5.0, "Liquid Cooling": 30.0, "Liquid Heating": 15.0, "Immersion": 100.0}
-        h_coef = h_cooling_map.get(cooling_type, 1.0)
-        grad_factor = 2.0 if "Liquid" in cooling_type else 1.2
+        return df_raw, kpis, ts_data
 
-        results = {
-            "Time": t_arr, "Pack_Voltage": [], "Pack_Current": [],
-            "SOC": [], "SOH": [], "Max_Temp": [], "Min_Temp": [], "Delta_T": [],
-            "SOP_Charge_kW": [], "SOP_Discharge_kW": [], "Warning_Msg": [], "Warning_Level": []
-        }
+    def _calculate_sop_logic(self, v_pack, r_total, temp_c, soc, series_num):
+        """
+        SOP (State of Power) 算法：基于电压窗口与温度降额的功率预测
+        适配钠离子电池窗口：2.0V ~ 3.95V 
+        """
+        V_MAX = 3.95 * series_num
+        V_MIN = 2.0 * series_num
         
-        total_loss = 0.0
+        # 1. 基础物理极限电流
+        i_max_dch = max(0, (v_pack - V_MIN) / r_total)
+        i_max_chg = max(0, (V_MAX - v_pack) / r_total)
         
-        #  提取 AI 需要的特征特征: 倍率和充放电状态
-        is_discharge = 1 if pack_current_a > 0 else 0
-        c_rate = abs(pack_current_a) / self.pack_capacity
-        
-        for i in range(steps):
-            i_cell = pack_current_a / self.parallel_num
-            
-            # 1. 动态内阻
-            r_dynamic = self._get_dynamic_resistance(current_soc, temp_core, i_cell)
-            r_aging = r_dynamic * (1 + (1-current_soh)*1.5)
-            
-            # 2. 电气状态
-            ocv = self._get_complex_ocv(current_soc)
-            v_polar = i_cell * 0.001 * (1 - np.exp(-t_arr[i]/100))
-            v_cell = ocv - (i_cell * r_aging) - v_polar
-            v_pack = v_cell * self.series_num
-            
-            # 3. 热力学计算 ( 物理机理) 高倍率接管 残差预测
-            if self.ai_heat_model is not None:
-                #  AI 产热模型接管：利用 RandomForest 预测极化尖峰
-                current_time_minutes = t_arr[i] / 60.0 
-                features = pd.DataFrame([[current_time_minutes, c_rate, is_discharge]], 
-                                        columns=['Time', 'C_Rate', 'Is_Discharge'])
-                #极化尖峰
-                heat_gen = self.ai_heat_model.predict(features)[0]
-            else:
-                # 降级：传统的焦耳热模型
-                heat_gen = (i_cell ** 2) * r_aging
-            #热熔  
-            thermal_mass = 900 
-            dT_core = (heat_gen - h_coef*0.2*(temp_core - temp_surface)) / thermal_mass * dt
-            #散热系数
-            #差分方程
-            dT_surf = (h_coef*0.2*(temp_core - temp_surface) - h_coef*(temp_surface - env_temp_c)) / (thermal_mass*0.5) * dt
-            temp_core += dT_core
-            temp_surface += dT_surf
-            
-            dynamic_spread = (abs(pack_current_a) / 100) * grad_factor * (1 - np.exp(-t_arr[i]/200))
-            t_max = temp_core + dynamic_spread
-            t_min = temp_surface - (dynamic_spread * 0.2)
-            
-            # 4. SOP 计算
-            r_pack_total = (r_aging * self.series_num) / self.parallel_num
-            p_peak, _, p_chg = self._calculate_sop_logic(v_pack, r_pack_total, t_max, current_soc)
-            
-            # 5. SOC 与 老化更新
-            soc_change = -(i_cell * dt / 3600) / self.cell_capacity
-            current_soc = np.clip(current_soc + soc_change, 0, 1)
-            
-            step_loss = AgingModel.calculate_step_loss(
-                temp_c=t_max, current_a=i_cell, soc_pct=current_soc * 100,
-                dt_seconds=dt, cell_capacity_ah=self.cell_capacity
-            )
-            
-            current_soh -= step_loss
-            total_loss += step_loss
-            
-            # 6. 数据记录
-            results["Pack_Voltage"].append(v_pack)
-            results["Pack_Current"].append(pack_current_a)
-            results["SOC"].append(current_soc * 100)
-            results["SOH"].append(current_soh * 100)
-            results["Max_Temp"].append(t_max)
-            results["Min_Temp"].append(t_min)
-            results["Delta_T"].append(t_max - t_min)
-            results["SOP_Charge_kW"].append(abs(p_chg) / 1000)
-            results["SOP_Discharge_kW"].append(abs(p_peak) / 1000)
-            results["Warning_Msg"].append("Normal") 
-            results["Warning_Level"].append(0)
-
-        df = pd.DataFrame(results)
-        kpis = self._generate_kpis(df, init_soc_pct, init_soh_pct, total_loss)
-        return df, kpis
-
-    # ==========================================
-    # 辅助物理算法 (Shared Logic)
-    # ==========================================
-    def _get_complex_ocv(self, soc):
-        return 3.0 + (soc * 0.9) + 0.3 * (soc**0.5) - 0.1 * (soc**3) + 0.1 * np.exp(-15 * (1-soc))
-
-    def _get_dynamic_resistance(self, soc, temp_c, current_a):
-        temp_k = temp_c + 273.15
-        temp_factor = np.exp(1000 * (1/temp_k - 1/298.15))
-        soc_factor = 1.0 + 2.0 * np.exp(-10 * soc) + 0.2 * np.exp(-10 * (1-soc))
-        rate_factor = 1.0 + 0.05 * (abs(current_a) / self.cell_capacity)
-        return self.base_resistance * temp_factor * soc_factor * rate_factor
-
-    def _calculate_sop_logic(self, v_pack, r_total, temp_c, soc):
-        v_max = 4.2 * self.series_num
-        v_min = 2.8 * self.series_num
-        i_max_dch = (v_pack - v_min) / r_total
-        i_max_chg = (v_max - v_pack) / r_total
-        
+        # 2. 动态降额因子 (Derating)
         derating = 1.0
-        if temp_c < 10: derating *= (temp_c + 10) / 20.0
-        if temp_c < 0: derating = 0.1
-        if soc < 0.1: derating *= 0.2
+        if temp_c > 45: derating *= 0.5    # 高温限功率保护
+        if temp_c < 0: derating *= 0.2     # 低温内阻剧增保护
+        if soc < 0.1: derating *= 0.3      # 低 SOC 防止过放
         
         p_dch_peak = v_pack * i_max_dch * derating
-        p_dch_cont = p_dch_peak * 0.6
         p_chg_peak = v_pack * i_max_chg * derating
-        return p_dch_peak, p_dch_cont, p_chg_peak
-
-    def _generate_kpis(self, df, init_soc, init_soh, total_loss):
-        last = df.iloc[-1]
-        w_msg = "Normal"
-        if last["Max_Temp"] > 55: w_msg = "🔴 Risk: Overheat"
-        elif last["Delta_T"] > 8: w_msg = "🟡 Warning: High Delta-T"
-        elif last["SOC"] < 10: w_msg = "🟡 Warning: Low SOC"
-            
-        return {
-            "soc": last["SOC"],
-            "soh": init_soh if self.use_omc else last["SOH"],
-            "soh_loss": total_loss,
-            "max_temp": last["Max_Temp"],
-            "avg_delta_t": df["Delta_T"].mean(),
-            "sop_dch": last["SOP_Discharge_kW"],
-            "warning": w_msg
-        }
-
-# 单例实例化
-engine = BatteryDigitalTwin()
+        
+        return p_dch_peak, p_chg_peak
