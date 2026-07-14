@@ -12,34 +12,42 @@ SOH AI 代理模型 — 数据驱动电池寿命预测模块
 子模块:
   - config:          全局配置与超参数
   - data_pipeline:   数据提取、清洗、特征工程管线
-  - models:          神经网络架构 (LSTM / Transformer / XGBoost)
-  - trainer:         离线训练 + 验证 + 超参数搜索
-  - predictor:       在线推理接口
-  - calibration:     模型校准与不确定性量化
-  - transfer_learning: 跨体系/跨工况迁移学习
+  - models:          神经网络架构 (XGBoost / BiLSTM+Attention / Transformer)
+  - trainer:         离线训练 + 验证 + Early Stopping + Checkpoint
+  - train:           训练 CLI 入口 (含合成数据模式)
+  - evaluate:        模型评估、指标计算、可视化
 
 典型用法:
 
-    # --- 训练 ---
+    # --- 数据管线 ---
     from models.soh_ai.data_pipeline import SOHDataPipeline
-    from models.soh_ai.trainer import SOHModelTrainer
-    from models.soh_ai.config import *
 
     pipeline = SOHDataPipeline()
     processed = pipeline.run(cells_data)
-    trainer = SOHModelTrainer()
-    models = trainer.train_all(processed)
 
-    # --- 推理 ---
-    from models.soh_ai.predictor import SOHPredictor
+    # --- 训练 ---
+    from models.soh_ai.trainer import EnsembleTrainer
 
-    predictor = SOHPredictor()
-    step_loss = predictor.predict_step_loss(temp_c, c_rate, soc, soh)
-    trajectory, rul = predictor.predict_trajectory(
-        cycle_history, future_conditions, horizon=500
+    trainer = EnsembleTrainer()
+    results = trainer.train_all(processed)
+
+    # --- 评估 ---
+    from models.soh_ai.evaluate import ModelEvaluator
+
+    evaluator = ModelEvaluator()
+    test_results = evaluator.evaluate_all(
+        results['ensemble'],
+        processed['sequences']['test'][0],
+        processed['sequences']['test'][1],
     )
+    evaluator.print_summary(test_results)
+
+    # --- 或直接命令行 ---
+    # python -m models.soh_ai.train --synthetic --model all
+    # python -m models.soh_ai.evaluate --model_dir models/weights/
 """
 
+# ── 配置 ──
 from .config import (
     FeatureConfig, FEATURE_CFG,
     XGBoostConfig, XGB_CFG,
@@ -48,6 +56,46 @@ from .config import (
     EnsembleConfig, ENSEMBLE_CFG,
     TrainingConfig, TRAIN_CFG,
     InferenceConfig, INFER_CFG,
+    DataQualityConfig, DQ_CFG,
+    PROCESSED_DATA_DIR, WEIGHTS_DIR,
+)
+
+# ── 数据管线 ──
+from .data_pipeline import (
+    SOHDataPipeline,
+    CycleFeatureExtractor,
+    DataCleaner,
+    SequenceBuilder,
+    DataSplitter,
+    create_synthetic_test_data,
+)
+
+# ── 模型架构 ──
+from .models import (
+    XGBoostWrapper,
+    BiLSTMAttention,
+    TemporalTransformer,
+    EnsembleModel,
+    AdditiveAttention,
+    PositionalEncoding,
+)
+
+# ── 训练器 ──
+from .trainer import (
+    BaseTrainer,
+    XGBoostTrainer,
+    LSTMTrainer,
+    TransformerTrainer,
+    EnsembleTrainer,
+    CrossValidator,
+    TrainingHistory,
+)
+
+# ── 评估 ──
+from .evaluate import (
+    RegressionMetrics,
+    Visualizer,
+    ModelEvaluator,
 )
 
 __all__ = [
@@ -59,4 +107,32 @@ __all__ = [
     'EnsembleConfig', 'ENSEMBLE_CFG',
     'TrainingConfig', 'TRAIN_CFG',
     'InferenceConfig', 'INFER_CFG',
+    'DataQualityConfig', 'DQ_CFG',
+    'PROCESSED_DATA_DIR', 'WEIGHTS_DIR',
+    # Data Pipeline
+    'SOHDataPipeline',
+    'CycleFeatureExtractor',
+    'DataCleaner',
+    'SequenceBuilder',
+    'DataSplitter',
+    'create_synthetic_test_data',
+    # Models
+    'XGBoostWrapper',
+    'BiLSTMAttention',
+    'TemporalTransformer',
+    'EnsembleModel',
+    'AdditiveAttention',
+    'PositionalEncoding',
+    # Trainer
+    'BaseTrainer',
+    'XGBoostTrainer',
+    'LSTMTrainer',
+    'TransformerTrainer',
+    'EnsembleTrainer',
+    'CrossValidator',
+    'TrainingHistory',
+    # Evaluate
+    'RegressionMetrics',
+    'Visualizer',
+    'ModelEvaluator',
 ]

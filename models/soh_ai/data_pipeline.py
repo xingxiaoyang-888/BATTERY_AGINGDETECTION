@@ -702,37 +702,38 @@ class SOHDataPipeline:
 
     def _fit_scale(self, splits: Dict[str, pd.DataFrame],
                    full_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
-        """拟合并应用特征标准化"""
-        # 确定需要标准化的列
-        exclude = ['cell_id', 'chemistry', 'cycle_index', 'soh_raw', 'soh_jump_flag']
-        scale_cols = [c for c in full_df.columns
-                     if c not in exclude and full_df[c].dtype in ('float64', 'float32', 'int64', 'int32')]
+        """
+        拟合并应用特征标准化。
 
-        # 目标列单独 scalar（用于逆变换）
+        ⚠️ 设计原则：
+          - X (特征) → RobustScaler 标准化（去量纲，抑制异常值）
+          - y (SOH)  → 不做任何缩放！SOH 物理定义域 [0, 1]，天然归一化
+                       对 y 做 StandardScaler 会导致模型预测缩放域的值，
+                       评估时 RMSE 失去物理意义，且推理部署必须耦合 scaler。
+        """
         target_col = FEATURE_CFG.target_col
-        feature_cols = [c for c in scale_cols if c != target_col]
 
-        # X scaler: 对所有特征列拟合
-        x_scaler = RobustScaler(quantile_range=(5, 95))  # 对异常值鲁棒
+        # 确定需要标准化的特征列（排除目标列和元数据列）
+        exclude = ['cell_id', 'chemistry', 'cycle_index', 'soh_raw', 'soh_jump_flag', target_col]
+        feature_cols = [c for c in full_df.columns
+                       if c not in exclude and full_df[c].dtype in ('float64', 'float32', 'int64', 'int32')]
+
+        # X scaler: 对特征列做鲁棒标准化
+        x_scaler = RobustScaler(quantile_range=(5, 95))
         x_scaler.fit(splits['train'][feature_cols].values)
-
-        # y scaler: 仅对目标列拟合
-        y_scaler = StandardScaler()
-        if target_col in splits['train'].columns:
-            y_scaler.fit(splits['train'][[target_col]].values)
-
         self.scalers['X'] = x_scaler
-        self.scalers['y'] = y_scaler
+        self.scalers['y'] = None  # 不再缩放 y
 
-        # 变换所有划分
+        # 变换所有划分：X 标准化，y 保持原值
         scaled = {}
         for split_name, sdf in splits.items():
             sdf_scaled = sdf.copy()
             sdf_scaled[feature_cols] = x_scaler.transform(sdf[feature_cols].values)
-            if target_col in sdf.columns:
-                sdf_scaled[target_col] = y_scaler.transform(sdf[[target_col]].values)
+            # y 不缩放：SOH 保留真实的 [0, 1] 物理值
             scaled[split_name] = sdf_scaled
 
+        logger.info(f"  特征标准化完成: {len(feature_cols)} 个特征列已缩放, "
+                    f"SOH 保持原始物理域 [0, 1]")
         return scaled
 
     def _save(self, feature_df: pd.DataFrame,

@@ -243,7 +243,7 @@ class TrainingConfig:
 
     # 设备
     device: str = "cuda"            # "cuda" | "cpu"
-    num_workers: int = 4            # DataLoader 工作进程数
+    num_workers: int = 0            # DataLoader 工作进程数 (0=主进程, 避免多进程复制数据OOM)
 
     # 随机种子
     seed: int = 42
