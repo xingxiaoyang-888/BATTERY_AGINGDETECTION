@@ -703,6 +703,13 @@ class EnsembleTrainer:
             logger.info("\n" + "=" * 60)
             logger.info("  测试集评估")
             logger.info("=" * 60)
+
+            # 同步设备：将集成模型的 device 设为首个 PyTorch 子模型的设备
+            if self.lstm_trainer is not None:
+                self.ensemble.to(self.lstm_trainer.device)
+            elif self.transformer_trainer is not None:
+                self.ensemble.to(self.transformer_trainer.device)
+
             test_results = self._evaluate_test(X_test, y_test)
 
         # ── 5. 汇总 ──
