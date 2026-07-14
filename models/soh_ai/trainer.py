@@ -511,7 +511,6 @@ class LSTMTrainer(BaseTrainer):
             mode='min',
             factor=self.cfg.lr_factor,
             patience=self.cfg.lr_patience,
-            verbose=False,
         )
 
 
