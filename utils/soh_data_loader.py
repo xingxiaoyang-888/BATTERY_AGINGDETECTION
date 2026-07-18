@@ -84,12 +84,13 @@ class CellDegradationData:
 
     @property
     def soh_series(self) -> np.ndarray:
-        """计算 SOH 序列（基于初始放电容量的比值）"""
+        """计算 SOH 序列（基于全部循环中的最大放电容量作为 BOL 参考）"""
         if not self.cycles:
             return np.array([])
-        ref_cap = self.nominal_capacity_ah or self.cycles[0].discharge_capacity_ah
-        if ref_cap <= 0:
-            ref_cap = self.cycles[0].discharge_capacity_ah
+        # 取全生命周期最大放电容量作为标称容量 (BOL)
+        valid_caps = [c.discharge_capacity_ah for c in self.cycles
+                      if c.discharge_capacity_ah > 0]
+        ref_cap = max(valid_caps) if valid_caps else 1.0
         return np.array([c.discharge_capacity_ah / ref_cap for c in self.cycles])
 
 
@@ -476,9 +477,12 @@ class WenzhouDataLoader:
         # 转换为标准化的 CycleData 列表
         cycles = self._convert_to_cycles(raw_data, ext, filepath)
 
-        # 推断标称容量
+        # 推断标称容量 (全生命周期最大放电容量)
         if nominal_capacity_ah is None and cycles:
-            nominal_capacity_ah = cycles[0].discharge_capacity_ah
+            valid_caps = [c.discharge_capacity_ah for c in cycles
+                          if c.discharge_capacity_ah > 0]
+            if valid_caps:
+                nominal_capacity_ah = max(valid_caps)
 
         return CellDegradationData(
             cell_id=cell_id,
@@ -498,12 +502,17 @@ class WenzhouDataLoader:
         cycles = []
 
         if ext == '.mat':
-            # MATLAB 数据 → CycleInfo struct array
-            mat_cycles = MATFileLoader.extract_cycle_info(raw_data)
-            for i, mc in enumerate(mat_cycles):
-                cd = self._mat_dict_to_cycle(mc, i)
-                if cd:
-                    cycles.append(cd)
+            # 检测 MAT 文件格式类型
+            if 'Discharge_capacity' in raw_data:
+                # Final.mat 格式: flat arrays，每列一个循环
+                cycles = self._final_mat_to_cycles(raw_data, filepath)
+            else:
+                # 旧格式: Cycle_information struct array
+                mat_cycles = MATFileLoader.extract_cycle_info(raw_data)
+                for i, mc in enumerate(mat_cycles):
+                    cd = self._mat_dict_to_cycle(mc, i)
+                    if cd:
+                        cycles.append(cd)
 
         elif ext in ('.xls', '.xlsx'):
             # Excel 数据 → 多个 sheet
@@ -558,6 +567,113 @@ class WenzhouDataLoader:
         except Exception as e:
             logger.warning(f"  转换 MAT 循环 {idx} 失败: {e}")
             return None
+
+    def _load_paired_info(self, final_path: str) -> Optional[Dict[str, Any]]:
+        """
+        加载与 Final.mat 配对的 Cycle_information.mat
+
+        从 Cycle_information.mat 中提取:
+          - Discharge_resistance / Charge_resistance → 直流内阻
+          - MODE_current → 电流模式
+          - 各类分类标签
+
+        Returns:
+            Dict 或 None (配对文件不存在时)
+        """
+        final_file = Path(final_path)
+        info_file = final_file.parent / final_file.name.replace(
+            'Detail_Final.mat', 'Detail_Cycle_information.mat')
+        if info_file.exists():
+            try:
+                return MATFileLoader.load(str(info_file))
+            except Exception:
+                logger.debug(f"  配对文件加载失败: {info_file.name}")
+        return None
+
+    def _final_mat_to_cycles(self, mat_data: Dict[str, Any],
+                             filepath: str) -> List[CycleData]:
+        """
+        解析 Wenzhou Final.mat 的 flat-array 结构
+
+        Final.mat 结构 (每个变量为 shape=(1, N_cycles) 的数组):
+          - Discharge_capacity / Charge_capacity → 放/充电容量 (单位: mAs)
+          - Discharge_voltage_mean / Charge_voltage_mean → 平均电压 (V)
+          - Discharge_current_mean / Charge_current_mean → 平均电流 (mA)
+          - Discharge_datetime_* / Charge_datetime_* → 时间戳 (MATLAB datenum)
+          - Charging_power / Discharging_power → 原始功率时序 (cell array)
+
+        同时尝试加载配对的 Cycle_information.mat 获取电阻数据。
+        """
+        # 处理 squeeze 后的数组 (可能是 1D 或 2D)
+        def _get_1d(arr, n=None):
+            """安全获取 1D 数组 (兼容 squeeze_me=True/False)"""
+            a = np.atleast_1d(np.asarray(arr).squeeze())
+            return a
+
+        dis_cap_arr = _get_1d(mat_data['Discharge_capacity'])
+        n_cycles = len(dis_cap_arr)
+
+        # 尝试加载配对的 Cycle_information.mat
+        info_data = self._load_paired_info(filepath)
+
+        # 预提取数组 (避免循环中重复索引)
+        chg_cap_arr = _get_1d(mat_data['Charge_capacity'])
+        dis_volt_arr = _get_1d(mat_data.get('Discharge_voltage_mean', np.zeros(n_cycles)))
+        chg_volt_arr = _get_1d(mat_data.get('Charge_voltage_mean', np.zeros(n_cycles)))
+        dis_curr_arr = _get_1d(mat_data.get('Discharge_current_mean', np.zeros(n_cycles)))
+        chg_curr_arr = _get_1d(mat_data.get('Charge_current_mean', np.zeros(n_cycles)))
+
+        # 从 Cycle_information.mat 提取电阻 (如有)
+        dis_res_arr = None
+        chg_res_arr = None
+        if info_data is not None:
+            if 'Discharge_resistance' in info_data:
+                dis_res_arr = _get_1d(info_data['Discharge_resistance'])
+            if 'Charge_resistance' in info_data:
+                chg_res_arr = _get_1d(info_data['Charge_resistance'])
+
+        cycles = []
+        for i in range(n_cycles):
+            try:
+                dis_cap = abs(float(dis_cap_arr[i]))   # 取绝对值
+                chg_cap = float(chg_cap_arr[i])
+
+                # 库仑效率 (考虑部分循环的情况)
+                ce = dis_cap / chg_cap if chg_cap > 0 else 0.0
+                ce = min(ce, 1.0)  # 钳制到 [0, 1]
+
+                # 直流内阻 (优先放电内阻)
+                dcr = np.nan
+                if dis_res_arr is not None:
+                    dcr = float(dis_res_arr[i])
+                if (np.isnan(dcr) or dcr == 0) and chg_res_arr is not None:
+                    dcr = float(chg_res_arr[i])
+
+                # C-rate 估算: C_rate ≈ |I_mean| / (|Q|/3600)
+                # Q 单位 mAs, I 单位 mA → C_rate = I / (Q/3600) = I*3600/Q
+                nominal_q = dis_cap if dis_cap > 0 else 1.0
+                c_rate_dis = (abs(float(dis_curr_arr[i])) * 3600) / nominal_q
+                c_rate_chg = (float(chg_curr_arr[i]) * 3600) / nominal_q if chg_cap > 0 else 0.0
+
+                cd = CycleData(
+                    cycle_index=i + 1,
+                    discharge_capacity_ah=dis_cap,
+                    charge_capacity_ah=chg_cap,
+                    coulombic_efficiency=ce,
+                    temperature_c=25.0,  # 冷诅咒数据: 温度从实验元数据获取
+                    c_rate_charge=c_rate_chg,
+                    c_rate_discharge=c_rate_dis,
+                    mean_discharge_voltage_v=float(dis_volt_arr[i]),
+                    mean_charge_voltage_v=float(chg_volt_arr[i]),
+                    dc_resistance_ohm=dcr if not np.isnan(dcr) else None,
+                    metadata={'source_file': filepath}
+                )
+                cycles.append(cd)
+            except Exception as e:
+                logger.warning(f"  转换 Final.mat 循环 {i} 失败 [{filepath}]: {e}")
+
+        logger.info(f"  [Final.mat] 解析完成: {len(cycles)} 个循环 (含电阻={dis_res_arr is not None})")
+        return cycles
 
     def _excel_dict_to_cycle(self, d: dict, idx: int) -> Optional[CycleData]:
         """将 Excel 行字典转为 CycleData"""
@@ -633,16 +749,16 @@ class WenzhouDataLoader:
         return files
 
     def _find_cold_curse_files(self) -> List[Tuple[str, str, str]]:
-        """扫描冷诅咒数据集文件"""
+        """扫描冷诅咒数据集文件 — 只匹配 Detail_Final.mat (主数据源)"""
         files = []
-        for f in Path(self.base_dir).glob('**/*.mat'):
+        for f in Path(self.base_dir).glob('**/*Detail_Final.mat'):
             fname = f.name
             # 匹配 Dongzhen-XXX 命名模式
             m = re.search(r'Dongzhen-(\d+)', fname)
             if m:
                 cell_id = f"Dongzhen-{m.group(1)}"
                 files.append((str(f), cell_id, "lithium-ion"))
-        logger.info(f"  发现 {len(files)} 个冷诅咒数据文件")
+        logger.info(f"  发现 {len(files)} 个冷诅咒数据文件 (Final.mat)")
         return files
 
     def _find_randomized_files(self) -> List[Tuple[str, str, str]]:

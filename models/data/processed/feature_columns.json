@@ -1,6 +1,7 @@
 [
   "soh",
   "cumulative_ah_throughput",
+  "internal_resistance",
   "coulombic_efficiency",
   "temperature_c",
   "c_rate_charge",

@@ -1,19 +1,17 @@
 {
-  "timestamp": "2026-06-09T20:51:25.505340",
+  "timestamp": "2026-07-19T00:48:29.277392",
   "original_shape": [
-    4000,
+    267969,
     19
   ],
-  "cells": 8,
-  "dropped_columns": [
-    "internal_resistance"
-  ],
+  "cells": 146,
+  "dropped_columns": [],
   "rejected_cells": [],
-  "outliers_replaced": 0,
-  "capacity_jumps": 0,
+  "outliers_replaced": 1840,
+  "capacity_jumps": 3751,
   "final_shape": [
-    4000,
-    15
+    267969,
+    16
   ],
   "final_nan_count": 0
 }

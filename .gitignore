@@ -50,9 +50,17 @@ battery_app.db
 *.pth
 *.pkl
 *.h5
+# 例外: 小尺寸的 SOH 标准化器允许提交 (训练/推理必需)
+!models/weights/soh_scalers.pkl
 
 # 忽略庞大的 CSV 训练集数据 (如果你想传个小样本做 Demo，可以把特定文件排除)
-# *.csv 
+# *.csv
+
+# 忽略原始数据集 (通过 torrent/OneDrive 下载，不应提交到 git)
+Wenzhou series battery degradation datasets (April_2026)/Wenzhou Cold Curse Battery Data/
+Wenzhou series battery degradation datasets (April_2026)/Wenzhou Sodium-ion Battery Degradation Data/
+Wenzhou series battery degradation datasets (April_2026)/Wenzhou Randomized Battery Data/
+Wenzhou series battery degradation datasets (April_2026)/Wenzhou Pack Degradation Data/
 
 # ==========================================
 # 5. 操作系统与 IDE 缓存
