@@ -29,7 +29,7 @@ from sklearn.preprocessing import StandardScaler, RobustScaler
 import joblib
 
 from .config import (
-    FEATURE_CFG, DQ_CFG, TRAIN_CFG,
+    FEATURE_CFG, ACTUAL_FEATURE_COLUMNS, DQ_CFG, TRAIN_CFG,
     PROCESSED_DATA_DIR, WEIGHTS_DIR,
 )
 from utils.soh_data_loader import CellDegradationData, CycleData
@@ -83,21 +83,23 @@ class CycleFeatureExtractor:
 
         n_cycles = len(cell.cycles)
         features = {}
+        cumulative_ah = np.cumsum([max(0.0, float(c.discharge_capacity_ah or 0.0)) for c in cell.cycles])
 
-        # --- A. 状态特征（来自当前循环） ---
+        # --- A. ???????????? ---
         soh_series = cell.soh_series  # shape: (n_cycles,)
         for i, cycle in enumerate(cell.cycles):
             features.setdefault('soh', [None] * n_cycles)[i] = soh_series[i]
             features.setdefault('cycle_index', [None] * n_cycles)[i] = cycle.cycle_index
-            features.setdefault('cumulative_ah_throughput', [None] * n_cycles)[i] = (
-                sum(c.discharge_capacity_ah for c in cell.cycles[:i+1])
-            )
-            features.setdefault('internal_resistance', [None] * n_cycles)[i] = (
-                cycle.dc_resistance_ohm
-            )
-            features.setdefault('coulombic_efficiency', [None] * n_cycles)[i] = (
-                cycle.coulombic_efficiency
-            )
+            features.setdefault('cumulative_ah_throughput', [None] * n_cycles)[i] = cumulative_ah[i]
+            features.setdefault('internal_resistance', [None] * n_cycles)[i] = cycle.dc_resistance_ohm
+            features.setdefault('coulombic_efficiency', [None] * n_cycles)[i] = cycle.coulombic_efficiency
+
+        # --- B. ???? ---
+        for i, cycle in enumerate(cell.cycles):
+            features.setdefault('temperature_c', [None] * n_cycles)[i] = cycle.temperature_c
+            features.setdefault('c_rate_charge', [None] * n_cycles)[i] = cycle.c_rate_charge
+            features.setdefault('c_rate_discharge', [None] * n_cycles)[i] = cycle.c_rate_discharge
+            features.setdefault('rest_time_h', [None] * n_cycles)[i] = cycle.rest_time_h
 
         # --- B. 工况特征 ---
         for i, cycle in enumerate(cell.cycles):
@@ -419,12 +421,11 @@ class SequenceBuilder:
         target_col = target_col or self.cfg.target_col
 
         if feature_cols is None:
-            # 自动选择数值列（排除非特征列）
-            exclude = ['cell_id', 'chemistry', 'cycle_index', 'soh_raw', 'soh_jump_flag',
-                       target_col]
-            feature_cols = [c for c in df.columns
-                           if c not in exclude and df[c].dtype in ('float64', 'float32', 'int64', 'int32')]
-
+            # 优先使用配置里定义的真实输入列，避免把趋势/标签/派生列误喂给模型
+            feature_cols = [c for c in FEATURE_CFG.all_features if c in df.columns]
+            if not feature_cols:
+                exclude = ['cell_id', 'chemistry', 'cycle_index', 'soh_raw', 'soh_jump_flag', target_col]
+                feature_cols = [c for c in df.columns if c not in exclude and df[c].dtype in ('float64', 'float32', 'int64', 'int32')]
         # 确保目标列可用
         if target_col not in df.columns:
             raise ValueError(f"目标列 '{target_col}' 不在 DataFrame 中。列: {df.columns.tolist()}")
@@ -506,7 +507,7 @@ class DataSplitter:
         n_cells = len(cells)
 
         if method == "auto":
-            method = "leave_one_cell_out" if n_cells <= 5 else "random_cell"
+            method = "leave_one_cell_out" if self.cfg.leave_one_cell_out else "random_cell"
 
         logger.info(f"  数据划分方法: {method}, 共 {n_cells} 个电芯")
 
@@ -546,13 +547,16 @@ class DataSplitter:
         train_df = df[df['cell_id'].isin(train_cells)]
         val_df = df[df['cell_id'] == val_cell]
         test_df = df[df['cell_id'] == test_cell]
-
-        # val/test 可能相同，进一步按循环划分
+        # 留一电芯策略下，val/test 必须来自不同电芯，避免 early stopping 泄露
         if val_cell == test_cell:
-            cell_data = df[df['cell_id'] == val_cell].sort_values('cycle_index')
-            n = len(cell_data)
-            val_df = cell_data.iloc[:int(n * 0.5)]
-            test_df = cell_data.iloc[int(n * 0.5):]
+            remaining = [c for c in cells if c not in {val_cell, test_cell}]
+            if remaining:
+                test_cell = remaining[0]
+            else:
+                cell_data = df[df['cell_id'] == val_cell].sort_values('cycle_index')
+                n = len(cell_data)
+                val_df = cell_data.iloc[:int(n * 0.5)]
+                test_df = cell_data.iloc[int(n * 0.5):]
 
         return {'train': train_df, 'val': val_df, 'test': test_df}
 

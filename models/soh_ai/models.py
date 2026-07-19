@@ -328,6 +328,27 @@ class BiLSTMAttention(nn.Module):
         out = self.fc(out)
         return out
 
+    @torch.no_grad()
+    def rollout(self, x: torch.Tensor, steps: int, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """基于最近窗口做自回归滚动推演。"""
+        preds = []
+        cur = x
+        cur_mask = mask
+
+        for _ in range(steps):
+            y = self.forward(cur, cur_mask)
+            next_pred = y[:, -1:] if y.ndim == 2 else y.unsqueeze(-1)
+            preds.append(next_pred)
+
+            next_step = cur[:, -1:, :].clone()
+            next_step[:, :, 0] = next_pred
+            cur = torch.cat([cur[:, 1:, :], next_step], dim=1)
+
+            if cur_mask is not None:
+                cur_mask = torch.cat([cur_mask[:, 1:], torch.ones_like(cur_mask[:, :1])], dim=1)
+
+        return torch.cat(preds, dim=1)
+
 
 # ═══════════════════════════════════════════════════════════════
 # 模型 3: Temporal Transformer
@@ -398,7 +419,7 @@ class TemporalTransformer(nn.Module):
         """
         Args:
             x:    (batch, seq_len, n_features)
-            mask: (batch, seq_len) True=padding, False=valid
+            mask: (batch, seq_len) 1/True=有效位置，0/False=padding
                   Transformer 期望 True=ignore, 所以需要反转为 src_key_padding_mask
 
         Returns:
@@ -412,7 +433,7 @@ class TemporalTransformer(nn.Module):
         # src_key_padding_mask: True = 忽略该位置
         src_key_padding_mask = None
         if mask is not None:
-            src_key_padding_mask = ~mask  # True=padding, False=valid
+            src_key_padding_mask = ~mask.bool()
 
         encoded = self.encoder(
             x,
@@ -422,7 +443,7 @@ class TemporalTransformer(nn.Module):
         # 均值池化
         if mask is not None:
             # 仅在有效位置上求均值
-            valid_mask = mask.unsqueeze(-1).float()  # (B, L, 1)
+            valid_mask = mask.bool().unsqueeze(-1).float()  # (B, L, 1)
             pooled = (encoded * valid_mask).sum(dim=1) / valid_mask.sum(dim=1).clamp(min=1)
         else:
             pooled = encoded.mean(dim=1)
@@ -431,6 +452,21 @@ class TemporalTransformer(nn.Module):
         out = self.pred_head(pooled)  # (B, horizon)
         return out
 
+
+    @torch.no_grad()
+    def rollout(self, x: torch.Tensor, steps: int, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """自回归滚动推演未来若干步。"""
+        preds = []
+        cur = x
+        cur_mask = mask
+        for _ in range(steps):
+            y = self.forward(cur, cur_mask)
+            preds.append(y[:, -1:] if y.ndim == 2 else y.unsqueeze(-1))
+            last = cur[:, -1:, :].detach()
+            cur = torch.cat([cur[:, 1:, :], last], dim=1)
+            if cur_mask is not None:
+                cur_mask = torch.cat([cur_mask[:, 1:], torch.ones_like(cur_mask[:, :1])], dim=1)
+        return torch.cat(preds, dim=1)
 
 # ═══════════════════════════════════════════════════════════════
 # 集成模型 (Ensemble)

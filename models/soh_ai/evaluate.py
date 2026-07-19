@@ -28,10 +28,12 @@ import json
 import logging
 import warnings
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +64,81 @@ except Exception:
 # ═══════════════════════════════════════════════════════════════
 # 指标计算
 # ═══════════════════════════════════════════════════════════════
+
+
+@dataclass
+class RolloutScenario:
+    """????????"""
+    temperature_c: Optional[Union[float, List[float], np.ndarray]] = None
+    c_rate_charge: Optional[Union[float, List[float], np.ndarray]] = None
+    c_rate_discharge: Optional[Union[float, List[float], np.ndarray]] = None
+    rest_time_h: Optional[Union[float, List[float], np.ndarray]] = None
+    soc_min: Optional[Union[float, List[float], np.ndarray]] = None
+    soc_max: Optional[Union[float, List[float], np.ndarray]] = None
+    soc_mean: Optional[Union[float, List[float], np.ndarray]] = None
+    cumulative_ah_throughput: Optional[Union[float, List[float], np.ndarray]] = None
+    internal_resistance: Optional[Union[float, List[float], np.ndarray]] = None
+    coulombic_efficiency: Optional[Union[float, List[float], np.ndarray]] = None
+
+    @classmethod
+    def from_any(cls, scenario_data=None):
+        if scenario_data is None:
+            return cls()
+        if isinstance(scenario_data, cls):
+            return scenario_data
+        if isinstance(scenario_data, dict):
+            return cls(**scenario_data)
+        if isinstance(scenario_data, pd.DataFrame):
+            return cls(**{col: scenario_data[col].to_numpy(dtype=np.float32) for col in scenario_data.columns})
+
+        path_obj = Path(scenario_data)
+        suffix = path_obj.suffix.lower()
+        if suffix == '.json':
+            with open(path_obj, 'r', encoding='utf-8') as fh:
+                payload = json.load(fh)
+            return cls(**payload)
+        if suffix == '.parquet':
+            df = pd.read_parquet(path_obj)
+            return cls(**{col: df[col].to_numpy(dtype=np.float32) for col in df.columns})
+        if suffix == '.npz':
+            archive = np.load(path_obj, allow_pickle=True)
+            payload = {key: archive[key] for key in archive.files}
+            return cls(**payload)
+        if suffix == '.npy':
+            loaded = np.load(path_obj, allow_pickle=True)
+            if isinstance(loaded, np.ndarray) and loaded.dtype == object:
+                return cls(**loaded.item())
+            raise ValueError('npy ????????? dict ??')
+        raise ValueError(f'??????????: {path_obj}')
+
+    def as_step_arrays(self, future_steps: int) -> Dict[str, np.ndarray]:
+        result = {}
+        for key, value in self.__dict__.items():
+            if value is None:
+                continue
+            arr = np.asarray(value, dtype=np.float32).reshape(-1)
+            if arr.size == 1:
+                result[key] = np.repeat(arr[0], future_steps)
+            else:
+                result[key] = np.resize(arr, future_steps).astype(np.float32)
+        return result
+
+
+@dataclass
+class CovariateRolloutConfig:
+    """??????????"""
+    strategy: str = "hybrid_default"
+    scenario: Optional[RolloutScenario] = None
+    nominal_capacity_ah: Optional[float] = None
+    step_duration_h: float = 1.0
+    delta_ah_per_step: Optional[float] = None
+    resistance_growth_rate: float = 0.002
+    ce_decay_rate: float = 0.00005
+    temperature_drift: float = 0.0
+    min_coulombic_efficiency: float = 0.85
+    min_soh: float = 0.0
+    max_internal_resistance: Optional[float] = None
+
 
 class RegressionMetrics:
     """回归指标计算器"""
@@ -447,6 +524,15 @@ class ModelEvaluator:
 
         # 指标
         metrics = self.metrics.compute_all(y_test, y_pred, model_name)
+        band_metrics = {}
+        y_flat = y_test.ravel()
+        for band_name, band_mask in {
+            'high_soh': y_flat >= 0.9,
+            'mid_soh': (y_flat < 0.9) & (y_flat >= 0.7),
+            'low_soh': y_flat < 0.7,
+        }.items():
+            if band_mask.any():
+                band_metrics[band_name] = self.metrics.compute_all(y_test[band_mask], y_pred[band_mask], f'{model_name}_{band_name}')
 
         # 图表
         figures = []
@@ -456,6 +542,7 @@ class ModelEvaluator:
 
         return {
             'metrics': metrics,
+            'band_metrics': band_metrics,
             'figures': figures,
             'predictions': y_pred,
         }
@@ -493,6 +580,226 @@ class ModelEvaluator:
             'comparison_figure': comp_fig,
         }
 
+    def _build_xgb_features(self, seq: np.ndarray) -> np.ndarray:
+        """?? XGBoost ??????????"""
+        last_step = seq[:, -1, :]
+        mean_vals = seq.mean(axis=1)
+        std_vals = seq.std(axis=1)
+        min_vals = seq.min(axis=1)
+        max_vals = seq.max(axis=1)
+        trend = seq[:, -1, :] - seq[:, 0, :]
+        return np.concatenate([last_step, mean_vals, std_vals, min_vals, max_vals, trend], axis=1)
+
+    def _predict_next_soh(self, model, seq: np.ndarray, mask: np.ndarray = None) -> float:
+        """????? SOH??? ensemble / PyTorch / XGBoost?"""
+        if hasattr(model, 'available_models') and hasattr(model, 'predict'):
+            pred = model.predict(seq[None, ...])
+            if isinstance(pred, dict):
+                pred = pred.get('ensemble', list(pred.values())[0])
+            return float(np.asarray(pred).reshape(-1)[-1])
+
+        if model.__class__.__name__ == 'XGBoostWrapper':
+            pred = model.predict(self._build_xgb_features(seq))
+            return float(np.asarray(pred).reshape(-1)[-1])
+
+        if isinstance(model, torch.nn.Module):
+            model.eval()
+            device = next(model.parameters()).device if hasattr(model, 'parameters') else torch.device('cpu')
+            X_t = torch.as_tensor(seq[None, ...], dtype=torch.float32, device=device)
+            mask_t = None if mask is None else torch.as_tensor(mask[None, ...], dtype=torch.bool, device=device)
+            with torch.no_grad():
+                pred = model(X_t, mask_t) if mask_t is not None else model(X_t)
+            return float(pred.detach().cpu().numpy().reshape(-1)[-1])
+
+        if hasattr(model, 'predict'):
+            pred = model.predict(seq[None, ...])
+            if isinstance(pred, dict):
+                pred = pred.get('ensemble', list(pred.values())[0])
+            return float(np.asarray(pred).reshape(-1)[-1])
+
+        raise TypeError('???????????????? SOH')
+
+    @staticmethod
+    def _select_rollout_value(value, step_idx: int, default_value: float):
+        """???/??????????????"""
+        if value is None:
+            return default_value
+        if np.isscalar(value):
+            return float(value)
+        array = np.asarray(value, dtype=np.float32).reshape(-1)
+        if len(array) == 0:
+            return default_value
+        return float(array[min(step_idx, len(array) - 1)])
+
+    @staticmethod
+    def _load_rollout_scenario(scenario_data, future_steps: int) -> RolloutScenario:
+        """????????????????????"""
+        return RolloutScenario.from_any(scenario_data)
+
+    @staticmethod
+    def _apply_covariate_strategy(seq: np.ndarray,
+                                  step_idx: int,
+                                  pred_soh: float,
+                                  rollout_cfg: CovariateRolloutConfig,
+                                  scenario: Dict[str, np.ndarray]) -> np.ndarray:
+        """????????????"""
+        from models.soh_ai.config import ACTUAL_FEATURE_COLUMNS
+        feature_index = {name: idx for idx, name in enumerate(ACTUAL_FEATURE_COLUMNS)}
+
+        next_step = seq[-1:, :].copy()
+        current = seq[-1, :]
+        previous = seq[-2, :] if seq.shape[0] > 1 else current
+        strategy = (rollout_cfg.strategy or 'hybrid_default').lower()
+
+        def choose(name: str, default_value: float) -> float:
+            if name in scenario:
+                return float(scenario[name][step_idx])
+            if strategy == 'scenario_driven':
+                return default_value
+            if name == 'temperature_c' and strategy in {'linear_trend', 'hybrid_default'}:
+                return float(current[feature_index[name]] + rollout_cfg.temperature_drift)
+            if name == 'cumulative_ah_throughput':
+                if rollout_cfg.delta_ah_per_step is not None:
+                    return float(current[feature_index[name]] + rollout_cfg.delta_ah_per_step)
+                if rollout_cfg.nominal_capacity_ah is not None:
+                    rate = max(float(current[feature_index['c_rate_discharge']]), 0.0)
+                    return float(current[feature_index[name]] + rollout_cfg.nominal_capacity_ah * rate * rollout_cfg.step_duration_h)
+            if name == 'internal_resistance':
+                trend = max(float(current[feature_index[name]] - previous[feature_index[name]]), 0.0)
+                growth = rollout_cfg.resistance_growth_rate * max(0.0, 1.0 - pred_soh)
+                return float(max(current[feature_index[name]], current[feature_index[name]] + trend + growth))
+            if name == 'coulombic_efficiency':
+                decay = rollout_cfg.ce_decay_rate * max(0.0, 1.0 - pred_soh)
+                return float(max(rollout_cfg.min_coulombic_efficiency, current[feature_index[name]] - decay))
+            return default_value
+
+        next_step[0, feature_index['soh']] = float(np.clip(pred_soh, rollout_cfg.min_soh, 1.0))
+
+        for name in ['temperature_c', 'c_rate_charge', 'c_rate_discharge', 'rest_time_h',
+                     'soc_min', 'soc_max', 'soc_mean', 'cumulative_ah_throughput',
+                     'internal_resistance', 'coulombic_efficiency']:
+            if name in feature_index:
+                next_step[0, feature_index[name]] = choose(name, current[feature_index[name]])
+
+        if 'soc_min' in feature_index and 'soc_max' in feature_index:
+            next_step[0, feature_index['soc_min']] = float(np.clip(next_step[0, feature_index['soc_min']], 0.0, 1.0))
+            next_step[0, feature_index['soc_max']] = float(np.clip(next_step[0, feature_index['soc_max']], 0.0, 1.0))
+            if next_step[0, feature_index['soc_min']] > next_step[0, feature_index['soc_max']]:
+                next_step[0, feature_index['soc_min']], next_step[0, feature_index['soc_max']] = (
+                    next_step[0, feature_index['soc_max']], next_step[0, feature_index['soc_min']]
+                )
+        if 'soc_mean' in feature_index:
+            soc_min = next_step[0, feature_index['soc_min']] if 'soc_min' in feature_index else 0.0
+            soc_max = next_step[0, feature_index['soc_max']] if 'soc_max' in feature_index else 1.0
+            next_step[0, feature_index['soc_mean']] = float(np.clip(next_step[0, feature_index['soc_mean']], soc_min, soc_max))
+        if 'internal_resistance' in feature_index and rollout_cfg.max_internal_resistance is not None:
+            next_step[0, feature_index['internal_resistance']] = float(min(next_step[0, feature_index['internal_resistance']], rollout_cfg.max_internal_resistance))
+        if 'coulombic_efficiency' in feature_index:
+            next_step[0, feature_index['coulombic_efficiency']] = float(np.clip(next_step[0, feature_index['coulombic_efficiency']], rollout_cfg.min_coulombic_efficiency, 1.0))
+
+        return np.concatenate([seq[1:], next_step], axis=0)
+
+    def rollout_sequence(self,
+                         model,
+                         X_window: np.ndarray,
+                         steps: int,
+                         mask: np.ndarray = None,
+                         rollout_cfg: CovariateRolloutConfig = None,
+                         scenario_data=None) -> np.ndarray:
+        """?????????????"""
+        if steps <= 0:
+            raise ValueError('steps ???? 0')
+
+        current = np.asarray(X_window, dtype=np.float32).copy()
+        preds = []
+        cfg = rollout_cfg or CovariateRolloutConfig()
+        scenario = self._load_rollout_scenario(scenario_data, steps).as_step_arrays(steps)
+
+        for step_idx in range(steps):
+            pred_value = self._predict_next_soh(model, current, mask=mask)
+            preds.append(pred_value)
+            current = self._apply_covariate_strategy(current, step_idx, pred_value, cfg, scenario)
+            if mask is not None:
+                mask = np.concatenate([mask[1:], np.ones_like(mask[:1])], axis=0)
+
+        return np.asarray(preds, dtype=np.float32)
+
+    @staticmethod
+    def _infer_input_dim(state_dict: dict, fallback: int) -> int:
+        """从权重字典推断输入维度。"""
+        candidate_keys = [
+            'lstm.weight_ih_l0',
+            'input_proj.weight',
+            'input_layer.weight',
+        ]
+        for key in candidate_keys:
+            if key in state_dict:
+                return int(state_dict[key].shape[-1])
+        return int(fallback)
+
+    @staticmethod
+    def _load_window(window_data: Union[str, Path, np.ndarray, pd.DataFrame]) -> np.ndarray:
+        """??????????? shape=(seq_len, n_features) ????"""
+        if isinstance(window_data, pd.DataFrame):
+            window = window_data.to_numpy(dtype=np.float32)
+        elif isinstance(window_data, np.ndarray):
+            window = np.asarray(window_data, dtype=np.float32)
+        else:
+            path_obj = Path(window_data)
+            suffix = path_obj.suffix.lower()
+            if suffix == '.npy':
+                window = np.load(path_obj).astype(np.float32)
+            elif suffix == '.npz':
+                archive = np.load(path_obj)
+                if 'window' in archive:
+                    window = archive['window'].astype(np.float32)
+                elif 'x' in archive:
+                    window = archive['x'].astype(np.float32)
+                else:
+                    window = archive[archive.files[0]].astype(np.float32)
+            elif suffix == '.parquet':
+                window = pd.read_parquet(path_obj).to_numpy(dtype=np.float32)
+            else:
+                raise ValueError(f'??????????: {path_obj}')
+
+        if window.ndim != 2:
+            raise ValueError(f'window_data ?????????? shape={window.shape}')
+        return window
+
+    def predict_future_soh(self,
+                           ensemble_or_model,
+                           window_data: Union[str, Path, np.ndarray, pd.DataFrame],
+                           future_steps: int = 100,
+                           mask: np.ndarray = None,
+                           rollout_cfg: CovariateRolloutConfig = None,
+                           scenario_data=None) -> Dict[str, any]:
+        """????????????????"""
+        X_window = self._load_window(window_data)
+        future_pred = self.rollout_sequence(ensemble_or_model, X_window, future_steps, mask=mask, rollout_cfg=rollout_cfg, scenario_data=scenario_data)
+        future_pred = np.asarray(future_pred, dtype=np.float32).reshape(-1)
+
+        start_soh = float(X_window[-1, 0]) if X_window.shape[1] > 0 else float('nan')
+        result = {
+            'window_shape': tuple(X_window.shape),
+            'future_steps': int(future_steps),
+            'start_soh': start_soh,
+            'future_soh': future_pred,
+            'end_soh': float(future_pred[-1]) if len(future_pred) else start_soh,
+        }
+
+        if X_window.shape[0] > 0:
+            cycle_indices = np.arange(1, X_window.shape[0] + 1)
+            fig = self.vis.plot_trajectory(
+                cycle_indices=cycle_indices,
+                true_soh=X_window[:, 0],
+                future_pred=future_pred,
+                model_name='FutureRollout',
+                save=True,
+            )
+            result['figure'] = fig
+
+        return result
+
     @staticmethod
     def print_summary(results: Dict[str, any]):
         """格式化打印评估摘要"""
@@ -520,31 +827,42 @@ class ModelEvaluator:
         print("=" * 60)
 
     @classmethod
+    @classmethod
     def from_trained(cls,
                      weights_dir: str = None,
                      test_data: tuple = None,
+                     window_data: Union[str, Path, np.ndarray, pd.DataFrame] = None,
+                     future_steps: int = 100,
+                     output_dir: str = None,
+                     rollout_cfg: CovariateRolloutConfig = None,
+                     scenario_data=None,
                      ) -> Dict[str, any]:
         """
-        从已训练的权重目录加载模型并评估。
+        ?????????????????
 
-        用于训练完成后的一键评估。
+        ?????????????
 
         Args:
-            weights_dir: 模型权重目录
-            test_data: (X_test, y_test) 测试数据
+            weights_dir: ??????
+            test_data: (X_test, y_test) ????
+            window_data: ?????????????
+            future_steps: ????
+            output_dir: ??????
+            rollout_cfg: ???????
+            scenario_data: ???????
 
         Returns:
-            dict: 评估结果
+            dict: ????
         """
-        from models.soh_ai.config import WEIGHTS_DIR
+        from models.soh_ai.config import WEIGHTS_DIR, ACTUAL_FEATURE_COLUMNS
         from models.soh_ai.models import XGBoostWrapper, BiLSTMAttention, TemporalTransformer, EnsembleModel
 
         weights_dir = Path(weights_dir or WEIGHTS_DIR)
-        evaluator = cls()
+        evaluator = cls(output_dir=output_dir)
 
         ensemble = EnsembleModel()
 
-        # 加载各模型
+        # ?????
         xgb_path = weights_dir / 'xgb_model.pkl'
         lstm_path = weights_dir / 'lstm_attention.pt'
         tf_path = weights_dir / 'transformer.pt'
@@ -552,46 +870,109 @@ class ModelEvaluator:
         if xgb_path.exists():
             ensemble.register('xgb', XGBoostWrapper.load(str(xgb_path)))
         if lstm_path.exists():
-            m = BiLSTMAttention()
-            m.load_state_dict(torch.load(str(lstm_path), map_location='cpu'))
+            lstm_state = torch.load(str(lstm_path), map_location='cpu')
+            lstm_input_dim = evaluator._infer_input_dim(lstm_state, len(ACTUAL_FEATURE_COLUMNS))
+            m = BiLSTMAttention(input_dim=lstm_input_dim)
+            m.load_state_dict(lstm_state)
             m.eval()
             ensemble.register('lstm', m)
         if tf_path.exists():
-            m = TemporalTransformer()
-            m.load_state_dict(torch.load(str(tf_path), map_location='cpu'))
+            tf_state = torch.load(str(tf_path), map_location='cpu')
+            tf_input_dim = evaluator._infer_input_dim(tf_state, len(ACTUAL_FEATURE_COLUMNS))
+            m = TemporalTransformer(input_dim=tf_input_dim)
+            m.load_state_dict(tf_state)
             m.eval()
             ensemble.register('transformer', m)
 
         if test_data is not None:
             X_test, y_test = test_data
             return evaluator.evaluate_all(ensemble, X_test, y_test)
-        else:
-            logger.warning("  未提供测试数据，仅加载模型。")
-            return {'ensemble': ensemble}
+        if window_data is not None:
+            scenario_payload = rollout_cfg.scenario if rollout_cfg and rollout_cfg.scenario is not None else scenario_data
+            return evaluator.predict_future_soh(
+                ensemble,
+                window_data=window_data,
+                future_steps=future_steps,
+                rollout_cfg=rollout_cfg,
+                scenario_data=scenario_payload,
+            )
 
-
-# ═══════════════════════════════════════════════════════════════
-# CLI 入口
-# ═══════════════════════════════════════════════════════════════
-
+        logger.warning("  ??????????????")
+        return {'ensemble': ensemble}
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description='SOH AI 模型评估')
+    parser = argparse.ArgumentParser(description='SOH AI ????')
     parser.add_argument('--model_dir', type=str, default=None,
-                       help='模型权重目录 (默认: models/weights/)')
+                       help='?????? (??: models/weights/)')
     parser.add_argument('--test_data', type=str, default=None,
-                       help='测试数据路径 (.npy 或 .parquet)')
+                       help='?????? (.npy ? .parquet)')
+    parser.add_argument('--window_data', type=str, default=None,
+                       help='????????? (.npy/.npz/.parquet)')
+    parser.add_argument('--future_steps', type=int, default=100,
+                       help='?????????')
+    parser.add_argument('--rollout_strategy', type=str, default='hybrid_default',
+                       choices=['hold_last', 'linear_trend', 'scenario_driven', 'hybrid_default'],
+                       help='???????')
+    parser.add_argument('--scenario_data', type=str, default=None,
+                       help='??????? (.json/.npy/.npz/.parquet)')
+    parser.add_argument('--nominal_capacity_ah', type=float, default=None,
+                       help='?? Ah ????????? (Ah)')
+    parser.add_argument('--step_duration_h', type=float, default=1.0,
+                       help='?????????? (h)')
+    parser.add_argument('--delta_ah_per_step', type=float, default=None,
+                       help='??????? Ah ??????????')
     parser.add_argument('--output_dir', type=str, default=None,
-                       help='图表输出目录')
+                       help='??????')
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
                        format='%(asctime)s [%(levelname)s] %(message)s')
 
+    test_data = None
+    if args.test_data:
+        test_path = Path(args.test_data)
+        if test_path.suffix.lower() == '.npy':
+            data = np.load(test_path, allow_pickle=True)
+            if isinstance(data, np.ndarray) and data.dtype == object and len(data) >= 2:
+                test_data = (data[0], data[1])
+            else:
+                raise ValueError(f'????????: {test_path}')
+        elif test_path.suffix.lower() == '.parquet':
+            df = pd.read_parquet(test_path)
+            if 'y_true' not in df.columns:
+                raise ValueError('parquet ???????? y_true ?')
+            y_test = df['y_true'].to_numpy(dtype=np.float32)
+            X_test = df.drop(columns=['y_true']).to_numpy(dtype=np.float32)
+            test_data = (X_test, y_test)
+        else:
+            raise ValueError(f'??????????: {test_path}')
+
+    rollout_cfg = CovariateRolloutConfig(
+        strategy=args.rollout_strategy,
+        scenario=RolloutScenario.from_any(args.scenario_data) if args.scenario_data else None,
+        nominal_capacity_ah=args.nominal_capacity_ah,
+        step_duration_h=args.step_duration_h,
+        delta_ah_per_step=args.delta_ah_per_step,
+    )
+
     result = ModelEvaluator.from_trained(
         weights_dir=args.model_dir,
+        test_data=test_data,
+        window_data=args.window_data,
+        future_steps=args.future_steps,
+        output_dir=args.output_dir,
+        rollout_cfg=rollout_cfg,
+        scenario_data=args.scenario_data,
     )
     ModelEvaluator.print_summary(result)
+
+    if 'future_soh' in result:
+        future_soh = result['future_soh']
+        print(f"\n  ?? SOH: {result['start_soh']:.6f}")
+        print(f"  ?? SOH: {result['end_soh']:.6f}")
+        print(f"  ????: {result['future_steps']}")
+        print(f"  ? 5 ?: {np.array2string(future_soh[:5], precision=6, separator=', ')}")
+        print(f"  ? 5 ?: {np.array2string(future_soh[-5:], precision=6, separator=', ')}")
 
 
 if __name__ == '__main__':

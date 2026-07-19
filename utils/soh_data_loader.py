@@ -590,6 +590,32 @@ class WenzhouDataLoader:
                 logger.debug(f"  配对文件加载失败: {info_file.name}")
         return None
 
+    def _infer_temperature_from_mode_current(self, info_data: Optional[Dict[str, Any]], fallback: float = 25.0) -> float:
+        """根据 MODE_current 或元数据推断实验温度。"""
+        if not info_data:
+            return fallback
+        for key in ('temperature', 'Temperature', 'temp', 'TEMP', 'ambient_temperature', 'ambient_temp'):
+            val = info_data.get(key)
+            if val is not None:
+                try:
+                    return float(np.asarray(val).squeeze())
+                except Exception:
+                    pass
+        mode_current = info_data.get('MODE_current')
+        if mode_current is None:
+            return fallback
+        try:
+            code = int(np.asarray(mode_current).squeeze())
+        except Exception:
+            return fallback
+        mapping = {
+            -33311000: -20.0,
+            -22211000: -10.0,
+            -11111000: 0.0,
+            -5561000: 25.0,
+        }
+        return mapping.get(code, fallback)
+
     def _final_mat_to_cycles(self, mat_data: Dict[str, Any],
                              filepath: str) -> List[CycleData]:
         """
@@ -615,6 +641,7 @@ class WenzhouDataLoader:
 
         # 尝试加载配对的 Cycle_information.mat
         info_data = self._load_paired_info(filepath)
+        ambient_temp = self._infer_temperature_from_mode_current(info_data, fallback=25.0)
 
         # 预提取数组 (避免循环中重复索引)
         chg_cap_arr = _get_1d(mat_data['Charge_capacity'])

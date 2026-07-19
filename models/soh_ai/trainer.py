@@ -33,6 +33,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
+from sklearn.model_selection import GroupKFold
+from sklearn.preprocessing import RobustScaler
 
 from .config import (
     FEATURE_CFG,
@@ -799,30 +801,119 @@ class EnsembleTrainer:
 # 交叉验证训练器
 # ═══════════════════════════════════════════════════════════════
 
+
 class CrossValidator:
-    """
-    K-Fold / Leave-One-Cell-Out 交叉验证
+    """??? `cell_id` ??? K-Fold ?????"""
 
-    电池数据交叉验证的特殊性:
-      - 同一电芯的循环数据不能跨 fold（数据泄漏）
-      - 已由 DataSplitter 在管线中处理，此处提供二次验证
-    """
-
-    def __init__(self, n_folds: int = 5):
+    def __init__(self, n_folds: int = 5, random_state: int = 42):
         self.n_folds = n_folds
+        self.random_state = random_state
         self.fold_scores: List[Dict] = []
 
     def run(self, pipeline_output: dict,
-            skip_xgb: bool = False) -> List[Dict]:
-        """
-        执行 K-Fold 交叉验证。
+            epochs: Optional[Dict[str, int]] = None,
+            skip_xgb: bool = False,
+            skip_lstm: bool = False,
+            skip_transformer: bool = False) -> List[Dict[str, Any]]:
+        from .data_pipeline import SequenceBuilder
 
-        注意: 当前实现预留接口。由于 DataSplitter 已做 leave-one-cell-out
-        划分，完整的 CV 需要重新组织数据。此处为重点 fold 训练提供框架。
-        """
-        logger.warning(
-            "  CrossValidator.run() 为预留接口。"
-            "当前数据管线 (DataSplitter) 已按 leave_one_cell_out 划分，"
-            "如需完整 K-Fold CV，请在 train.py 中使用 --kfold 参数。"
-        )
+        feature_df = pipeline_output.get('feature_df')
+        if feature_df is None or feature_df.empty:
+            raise ValueError('pipeline_output ????? feature_df')
+        if 'cell_id' not in feature_df.columns:
+            raise ValueError('feature_df ?? cell_id????? cell-level KFold')
+
+        feature_cols = pipeline_output.get('feature_cols')
+        if not feature_cols:
+            exclude = {'cell_id', 'chemistry', 'cycle_index', 'soh_raw', 'soh_jump_flag', FEATURE_CFG.target_col}
+            feature_cols = [
+                c for c in feature_df.columns
+                if c not in exclude and feature_df[c].dtype.kind in 'fiu'
+            ]
+
+        cells = feature_df['cell_id'].dropna().unique().tolist()
+        if self.n_folds < 2:
+            raise ValueError('n_folds ?? >= 2')
+        if len(cells) < self.n_folds:
+            raise ValueError(f'??? {len(cells)} ???? {self.n_folds}')
+
+        groups = feature_df['cell_id'].to_numpy()
+        gkf = GroupKFold(n_splits=self.n_folds)
+        seq_builder = SequenceBuilder()
+        epoch_cfg = epochs or {}
+        self.fold_scores = []
+
+        logger.info(f'  ???? cell-level KFold: n_folds={self.n_folds}, cells={len(cells)}')
+
+        for fold_idx, (train_val_idx, test_idx) in enumerate(gkf.split(feature_df, groups=groups), start=1):
+            train_val_df = feature_df.iloc[train_val_idx].copy()
+            test_df = feature_df.iloc[test_idx].copy()
+
+            train_val_cells = train_val_df['cell_id'].dropna().unique().tolist()
+            test_cells = test_df['cell_id'].dropna().unique().tolist()
+            if len(train_val_cells) < 2:
+                logger.warning(f'  Fold {fold_idx}: ???????????')
+                continue
+
+            val_size = max(1, int(round(len(train_val_cells) * 0.2)))
+            if val_size >= len(train_val_cells):
+                val_size = len(train_val_cells) - 1
+
+            val_cells = train_val_cells[:val_size]
+            train_cells = train_val_cells[val_size:]
+            if len(train_cells) == 0:
+                train_cells = train_val_cells[:-1]
+                val_cells = train_val_cells[-1:]
+
+            train_df = train_val_df[train_val_df['cell_id'].isin(train_cells)].copy()
+            val_df = train_val_df[train_val_df['cell_id'].isin(val_cells)].copy()
+
+            scaler = RobustScaler(quantile_range=(5, 95))
+            scaler.fit(train_df[feature_cols].values)
+
+            def _scale(df):
+                out = df.copy()
+                if not out.empty:
+                    out.loc[:, feature_cols] = scaler.transform(out[feature_cols].values)
+                return out
+
+            X_train, y_train, _, _ = seq_builder.build_sequences(_scale(train_df), feature_cols=feature_cols)
+            X_val, y_val, _, _ = seq_builder.build_sequences(_scale(val_df), feature_cols=feature_cols)
+            X_test, y_test, _, _ = seq_builder.build_sequences(_scale(test_df), feature_cols=feature_cols)
+
+            logger.info(
+                f'  Fold {fold_idx}/{self.n_folds}: train_cells={len(train_cells)}, val_cells={len(val_cells)}, '
+                f'test_cells={len(test_cells)} | X_train={X_train.shape}, X_val={X_val.shape}, X_test={X_test.shape}'
+            )
+
+            fold_trainer = EnsembleTrainer()
+            fold_result = fold_trainer.train_all(
+                {
+                    'sequences': {
+                        'train': (X_train, y_train),
+                        'val': (X_val, y_val),
+                        'test': (X_test, y_test),
+                    },
+                    'scalers': {'X': scaler, 'y': None},
+                    'feature_cols': feature_cols,
+                    'feature_df': feature_df,
+                },
+                epochs=epoch_cfg if epoch_cfg else None,
+                skip_xgb=skip_xgb,
+                skip_lstm=skip_lstm,
+                skip_transformer=skip_transformer,
+            )
+
+            self.fold_scores.append({
+                'fold': fold_idx,
+                'train_cells': [str(c) for c in train_cells],
+                'val_cells': [str(c) for c in val_cells],
+                'test_cells': [str(c) for c in test_cells],
+                'train_n': int(len(X_train)),
+                'val_n': int(len(X_val)),
+                'test_n': int(len(X_test)),
+                'available_models': fold_result.get('available_models', []),
+                'test_results': fold_result.get('test_results', {}),
+            })
+
         return self.fold_scores

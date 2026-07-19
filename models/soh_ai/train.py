@@ -82,6 +82,33 @@ def setup_logging(log_dir: str = None, verbose: bool = False):
     return log_file
 
 
+def summarize_kfold_results(fold_scores: list) -> dict:
+    """汇总 KFold 每个模型的指标均值和标准差。"""
+    from collections import defaultdict
+    import numpy as np
+
+    metric_store = defaultdict(lambda: defaultdict(list))
+    for fold_result in fold_scores:
+        for model_name, metrics in fold_result.get('test_results', {}).items():
+            for metric_name, metric_value in metrics.items():
+                if isinstance(metric_value, (int, float)):
+                    metric_store[model_name][metric_name].append(float(metric_value))
+
+    summary = {'folds': len(fold_scores), 'models': {}}
+    for model_name, metric_map in metric_store.items():
+        summary['models'][model_name] = {}
+        for metric_name, values in metric_map.items():
+            arr = np.asarray(values, dtype=float)
+            summary['models'][model_name][metric_name] = {
+                'mean': float(arr.mean()) if len(arr) else None,
+                'std': float(arr.std(ddof=1)) if len(arr) > 1 else 0.0,
+                'min': float(arr.min()) if len(arr) else None,
+                'max': float(arr.max()) if len(arr) else None,
+            }
+
+    return summary
+
+
 # ═══════════════════════════════════════════════════════════════
 # 训练主函数
 # ═══════════════════════════════════════════════════════════════
@@ -202,6 +229,54 @@ def run_training(args: argparse.Namespace) -> int:
     if args.batch_size:
         epoch_overrides['lstm_batch'] = args.batch_size
         epoch_overrides['transformer_batch'] = args.batch_size
+
+    if args.kfold is not None:
+        from models.soh_ai.trainer import CrossValidator
+        cv = CrossValidator(n_folds=args.kfold, random_state=args.seed)
+        logger.info(f"  启动 cell-level KFold: kfold={args.kfold}")
+        fold_scores = cv.run(
+            processed,
+            epochs=epoch_overrides if epoch_overrides else None,
+            skip_xgb=skip_xgb,
+            skip_lstm=skip_lstm,
+            skip_transformer=skip_transformer,
+        )
+
+        if fold_scores:
+            logger.info("\n" + "=" * 70)
+            logger.info("  KFold 结果汇总")
+            logger.info("=" * 70)
+            for fold_result in fold_scores:
+                fold_id = fold_result.get('fold')
+                metrics = fold_result.get('test_results', {})
+                logger.info(
+                    f"  Fold {fold_id}: train={fold_result.get('train_n', 0)}, "
+                    f"val={fold_result.get('val_n', 0)}, test={fold_result.get('test_n', 0)}"
+                )
+                for model_name, model_metrics in metrics.items():
+                    logger.info(
+                        f"    {model_name:12s} -> RMSE: {model_metrics.get('RMSE', float('nan')):.6f}, "
+                        f"MAE: {model_metrics.get('MAE', float('nan')):.6f}, "
+                        f"R2: {model_metrics.get('R2', float('nan')):.4f}"
+                    )
+
+            summary = summarize_kfold_results(fold_scores)
+            logger.info("\n  折间统计:")
+            for model_name, metric_map in summary['models'].items():
+                logger.info(f"  {model_name}:")
+                for metric_name, stats in metric_map.items():
+                    logger.info(
+                        f"    {metric_name:10s} mean={stats['mean']:.6f} std={stats['std']:.6f} "
+                        f"min={stats['min']:.6f} max={stats['max']:.6f}"
+                    )
+
+            output_dir = Path(args.output_dir or WEIGHTS_DIR)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            kfold_path = output_dir / f'kfold_results_{args.kfold}.json'
+            with open(kfold_path, 'w', encoding='utf-8') as f:
+                json.dump({'fold_scores': fold_scores, 'summary': summary}, f, indent=2, ensure_ascii=False)
+            logger.info(f"  KFold 结果已保存: {kfold_path}")
+        return 0
 
     ensemble_trainer = EnsembleTrainer()
 

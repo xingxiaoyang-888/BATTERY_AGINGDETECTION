@@ -138,12 +138,31 @@ class FeatureConfig:
 
     @property
     def n_features(self) -> int:
-        """输入特征总数"""
-        return len(self.all_features)
+        """输入特征总数。
+
+        训练管线当前稳定产出 11 维特征，直接返回真实维度，避免
+        “概念特征集”与实际输入列数漂移。
+        """
+        return 11
 
 
 # 全局特征配置实例
 FEATURE_CFG = FeatureConfig()
+
+# 当前训练管线稳定使用的实际输入特征列
+ACTUAL_FEATURE_COLUMNS = [
+    "soh",
+    "cumulative_ah_throughput",
+    "internal_resistance",
+    "coulombic_efficiency",
+    "temperature_c",
+    "c_rate_charge",
+    "c_rate_discharge",
+    "rest_time_h",
+    "soc_min",
+    "soc_max",
+    "soc_mean",
+]
 
 # ============================================================
 # 4. 模型超参数配置
