@@ -390,7 +390,7 @@ def check_data_integrity() -> Dict[str, any]:
     result['datasets_found'] = list(found_categories)
     result['missing'] = [c for c in TORRENT_FILES.values()
                          if c['category'] not in found_categories]
-    result['can_proceed'] = 'sodium-ion' in found_categories
+    result['can_proceed'] = len(found_categories) > 0
 
     return result
 
