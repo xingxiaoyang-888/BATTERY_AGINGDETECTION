@@ -758,10 +758,19 @@ class ModelEvaluator:
                 else:
                     window = archive[archive.files[0]].astype(np.float32)
             elif suffix == '.parquet':
+                import json
                 df = pd.read_parquet(path_obj)
-                # 只取数值列，排除 cell_id / chemistry 等字符串列
-                numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-                window = df[numeric_cols].to_numpy(dtype=np.float32)
+                # 从 feature_columns.json 读取训练用的特征列，确保维度匹配
+                col_file = Path(path_obj).parent / 'feature_columns.json'
+                if col_file.exists():
+                    with open(col_file) as f:
+                        feature_cols = json.load(f)
+                    # 过滤掉 df 中不存在的列
+                    feature_cols = [c for c in feature_cols if c in df.columns]
+                else:
+                    # fallback: 只取数值列
+                    feature_cols = df.select_dtypes(include=['number']).columns.tolist()
+                window = df[feature_cols].to_numpy(dtype=np.float32)
             else:
                 raise ValueError(f'??????????: {path_obj}')
 
