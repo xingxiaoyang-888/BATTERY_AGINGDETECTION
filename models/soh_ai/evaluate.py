@@ -117,10 +117,7 @@ class RolloutScenario:
             if value is None:
                 continue
             arr = np.asarray(value, dtype=np.float32).reshape(-1)
-            if arr.size == 1:
-                result[key] = np.repeat(arr[0], future_steps)
-            else:
-                result[key] = np.resize(arr, future_steps).astype(np.float32)
+            result[key] = np.repeat(arr[0], future_steps) if arr.size == 1 else np.resize(arr, future_steps).astype(np.float32)
         return result
 
 
@@ -138,6 +135,8 @@ class CovariateRolloutConfig:
     min_coulombic_efficiency: float = 0.85
     min_soh: float = 0.0
     max_internal_resistance: Optional[float] = None
+    enforce_monotonic: bool = True
+    max_soh_uplift_ratio: float = 1.01
 
 
 class RegressionMetrics:
@@ -380,7 +379,7 @@ class Visualizer:
             future_cycles = np.arange(future_start + 1,
                                      future_start + len(future_pred) + 1)
             ax.plot(future_cycles, future_pred, '--', color='#e53e3e',
-                   linewidth=1.5, label=f'Predicted ({len(future_pred)} cycles)', zorder=2)
+                   linewidth=1.5, label=f'Predicted ({len(future_pred)} cycles)', zorder=4)
 
         # EOL 阈值线
         ax.axhline(y=eol_threshold, color='#d69e2e', linestyle=':',
@@ -401,7 +400,14 @@ class Visualizer:
         ax.set_title(title)
         ax.legend(loc='best', fontsize=9)
         ax.grid(True, alpha=0.3)
-        ax.set_ylim(bottom=max(0.4, min(true_soh.min(), eol_threshold) - 0.1), top=1.02)
+        y_min = float(np.nanmin([np.nanmin(true_soh), eol_threshold]))
+        y_max_candidates = [np.nanmax(true_soh)]
+        if pred_soh is not None and len(pred_soh) > 0:
+            y_max_candidates.append(np.nanmax(pred_soh))
+        if future_pred is not None and len(future_pred) > 0:
+            y_max_candidates.append(np.nanmax(future_pred))
+        y_max = float(np.nanmax(y_max_candidates)) if y_max_candidates else 1.0
+        ax.set_ylim(bottom=max(0.0, y_min - 0.05), top=min(1.05, max(0.9, y_max + 0.05)))
 
         fig.tight_layout()
         if save:
@@ -621,7 +627,7 @@ class ModelEvaluator:
 
     @staticmethod
     def _select_rollout_value(value, step_idx: int, default_value: float):
-        """???/??????????????"""
+        """???/?????? step_idx ????"""
         if value is None:
             return default_value
         if np.isscalar(value):
@@ -633,7 +639,7 @@ class ModelEvaluator:
 
     @staticmethod
     def _load_rollout_scenario(scenario_data, future_steps: int) -> RolloutScenario:
-        """????????????????????"""
+        """??????????????????"""
         return RolloutScenario.from_any(scenario_data)
 
     @staticmethod
@@ -642,7 +648,7 @@ class ModelEvaluator:
                                   pred_soh: float,
                                   rollout_cfg: CovariateRolloutConfig,
                                   scenario: Dict[str, np.ndarray]) -> np.ndarray:
-        """????????????"""
+        """????????????????"""
         from models.soh_ai.config import ACTUAL_FEATURE_COLUMNS
         feature_index = {name: idx for idx, name in enumerate(ACTUAL_FEATURE_COLUMNS)}
 
@@ -650,6 +656,14 @@ class ModelEvaluator:
         current = seq[-1, :]
         previous = seq[-2, :] if seq.shape[0] > 1 else current
         strategy = (rollout_cfg.strategy or 'hybrid_default').lower()
+
+        previous_soh = float(current[feature_index['soh']])
+        capped_soh = float(np.clip(pred_soh, rollout_cfg.min_soh, 1.0))
+        if rollout_cfg.enforce_monotonic:
+            capped_soh = min(capped_soh, previous_soh * rollout_cfg.max_soh_uplift_ratio)
+            capped_soh = min(capped_soh, previous_soh)
+        soh_drop = max(previous_soh - capped_soh, 0.0)
+        soh_rate = soh_drop / max(previous_soh, 1e-6)
 
         def choose(name: str, default_value: float) -> float:
             if name in scenario:
@@ -660,20 +674,24 @@ class ModelEvaluator:
                 return float(current[feature_index[name]] + rollout_cfg.temperature_drift)
             if name == 'cumulative_ah_throughput':
                 if rollout_cfg.delta_ah_per_step is not None:
-                    return float(current[feature_index[name]] + rollout_cfg.delta_ah_per_step)
-                if rollout_cfg.nominal_capacity_ah is not None:
-                    rate = max(float(current[feature_index['c_rate_discharge']]), 0.0)
-                    return float(current[feature_index[name]] + rollout_cfg.nominal_capacity_ah * rate * rollout_cfg.step_duration_h)
+                    delta = rollout_cfg.delta_ah_per_step
+                else:
+                    c_rate = max(float(current[feature_index['c_rate_discharge']]), 0.0)
+                    nominal_capacity = rollout_cfg.nominal_capacity_ah or 1.0
+                    delta = nominal_capacity * c_rate * rollout_cfg.step_duration_h
+                return float(current[feature_index[name]] + delta * (1.0 + soh_rate))
             if name == 'internal_resistance':
-                trend = max(float(current[feature_index[name]] - previous[feature_index[name]]), 0.0)
-                growth = rollout_cfg.resistance_growth_rate * max(0.0, 1.0 - pred_soh)
-                return float(max(current[feature_index[name]], current[feature_index[name]] + trend + growth))
+                base = float(current[feature_index[name]])
+                prev_base = float(previous[feature_index[name]])
+                trend = max(base - prev_base, 0.0)
+                growth = rollout_cfg.resistance_growth_rate * soh_rate * max(base, 1e-6)
+                return float(base + trend + growth)
             if name == 'coulombic_efficiency':
-                decay = rollout_cfg.ce_decay_rate * max(0.0, 1.0 - pred_soh)
+                decay = rollout_cfg.ce_decay_rate * soh_rate
                 return float(max(rollout_cfg.min_coulombic_efficiency, current[feature_index[name]] - decay))
             return default_value
 
-        next_step[0, feature_index['soh']] = float(np.clip(pred_soh, rollout_cfg.min_soh, 1.0))
+        next_step[0, feature_index['soh']] = capped_soh
 
         for name in ['temperature_c', 'c_rate_charge', 'c_rate_discharge', 'rest_time_h',
                      'soc_min', 'soc_max', 'soc_mean', 'cumulative_ah_throughput',
@@ -691,7 +709,7 @@ class ModelEvaluator:
         if 'soc_mean' in feature_index:
             soc_min = next_step[0, feature_index['soc_min']] if 'soc_min' in feature_index else 0.0
             soc_max = next_step[0, feature_index['soc_max']] if 'soc_max' in feature_index else 1.0
-            next_step[0, feature_index['soc_mean']] = float(np.clip(next_step[0, feature_index['soc_mean']], soc_min, soc_max))
+            next_step[0, feature_index['soc_mean']] = float(np.clip(next_step[0, feature_index['soc_mean']], min(soc_min, soc_max), max(soc_min, soc_max)))
         if 'internal_resistance' in feature_index and rollout_cfg.max_internal_resistance is not None:
             next_step[0, feature_index['internal_resistance']] = float(min(next_step[0, feature_index['internal_resistance']], rollout_cfg.max_internal_resistance))
         if 'coulombic_efficiency' in feature_index:
@@ -707,9 +725,9 @@ class ModelEvaluator:
                          rollout_cfg: CovariateRolloutConfig = None,
                          scenario_data=None,
                          x_scaler=None) -> np.ndarray:
-        """自回归推演：逐步预测 SOH 并更新协变量滑动窗口"""
+        """?????????? SOH????????????"""
         if steps <= 0:
-            raise ValueError('steps 必须 > 0')
+            raise ValueError('steps ?? > 0')
 
         current = np.asarray(X_window, dtype=np.float32).copy()
         preds = []
@@ -717,14 +735,12 @@ class ModelEvaluator:
         scenario = self._load_rollout_scenario(scenario_data, steps).as_step_arrays(steps)
 
         for step_idx in range(steps):
-            # 模型输入需要归一化（SOH 列保持原值，其余列用 scaler 缩放）
             model_input = current.copy()
             if x_scaler is not None:
                 model_input[:, 1:] = x_scaler.transform(current[:, 1:])
             pred_value = self._predict_next_soh(model, model_input, mask=mask)
-            preds.append(pred_value)
-            # 协变量更新在原始物理空间进行
             current = self._apply_covariate_strategy(current, step_idx, pred_value, cfg, scenario)
+            preds.append(float(current[-1, 0]))
             if mask is not None:
                 mask = np.concatenate([mask[1:], np.ones_like(mask[:1])], axis=0)
 
@@ -744,8 +760,8 @@ class ModelEvaluator:
         return int(fallback)
 
     @staticmethod
-    def _load_window(window_data: Union[str, Path, np.ndarray, pd.DataFrame]) -> np.ndarray:
-        """??????????? shape=(seq_len, n_features) ????"""
+    def _load_window(window_data: Union[str, Path, np.ndarray, pd.DataFrame], history_cycles: int = 200) -> np.ndarray:
+        """???????parquet ???????????????????? 32 ??"""
         if isinstance(window_data, pd.DataFrame):
             window = window_data.to_numpy(dtype=np.float32)
         elif isinstance(window_data, np.ndarray):
@@ -764,27 +780,29 @@ class ModelEvaluator:
                 else:
                     window = archive[archive.files[0]].astype(np.float32)
             elif suffix == '.parquet':
-                import json
                 df = pd.read_parquet(path_obj)
-                # 按 cell_id 分组，取最后一个电芯的最后 32 步作为窗口
                 if 'cell_id' in df.columns:
                     last_cell = df['cell_id'].iloc[-1]
                     df = df[df['cell_id'] == last_cell]
-                df = df.tail(32)  # 取最后 32 个循环 = 模型窗口大小
-                # 从 feature_columns.json 读取训练用的特征列，确保维度匹配
-                col_file = Path(path_obj).parent / 'feature_columns.json'
-                if col_file.exists():
-                    with open(col_file) as f:
-                        feature_cols = json.load(f)
+                df = df.tail(history_cycles)
+                feature_cols_path = Path(path_obj).parent / 'feature_columns.json'
+                if feature_cols_path.exists():
+                    with open(feature_cols_path, 'r', encoding='utf-8') as fh:
+                        feature_cols = json.load(fh)
                     feature_cols = [c for c in feature_cols if c in df.columns]
                 else:
-                    feature_cols = df.select_dtypes(include=['number']).columns.tolist()
+                    from models.soh_ai.config import ACTUAL_FEATURE_COLUMNS
+                    feature_cols = [c for c in ACTUAL_FEATURE_COLUMNS if c in df.columns]
+                    if not feature_cols:
+                        feature_cols = df.select_dtypes(include=['number']).columns.tolist()
                 window = df[feature_cols].to_numpy(dtype=np.float32)
             else:
                 raise ValueError(f'??????????: {path_obj}')
 
         if window.ndim != 2:
-            raise ValueError(f'window_data 形状错误: {window.shape}')
+            raise ValueError(f'window_data ????: {window.shape}')
+        if window.shape[0] > 32:
+            return window[-32:]
         return window
 
     @staticmethod
@@ -804,14 +822,16 @@ class ModelEvaluator:
                            future_steps: int = 100,
                            mask: np.ndarray = None,
                            rollout_cfg: CovariateRolloutConfig = None,
-                           scenario_data=None) -> Dict[str, any]:
-        """SOH 未来轨迹推演"""
-        X_window = self._load_window(window_data)
-        # 加载 scaler（如可用）
+                           scenario_data=None,
+                           history_cycles: int = 200,
+                           cell_id: str = "") -> Dict[str, any]:
+        """SOH ???????"""
+        X_window = self._load_window(window_data, history_cycles=history_cycles)
         x_scaler = self._load_scaler()
+        scenario_payload = rollout_cfg.scenario if rollout_cfg and rollout_cfg.scenario is not None else scenario_data
         future_pred = self.rollout_sequence(ensemble_or_model, X_window, future_steps,
                                             mask=mask, rollout_cfg=rollout_cfg,
-                                            scenario_data=scenario_data, x_scaler=x_scaler)
+                                            scenario_data=scenario_payload, x_scaler=x_scaler)
         future_pred = np.asarray(future_pred, dtype=np.float32).reshape(-1)
 
         start_soh = float(X_window[-1, 0]) if X_window.shape[1] > 0 else float('nan')
@@ -829,6 +849,7 @@ class ModelEvaluator:
                 cycle_indices=cycle_indices,
                 true_soh=X_window[:, 0],
                 future_pred=future_pred,
+                cell_id=cell_id,
                 model_name='FutureRollout',
                 save=True,
             )
@@ -872,6 +893,8 @@ class ModelEvaluator:
                      output_dir: str = None,
                      rollout_cfg: CovariateRolloutConfig = None,
                      scenario_data=None,
+                     history_cycles: int = 200,
+                     cell_id: str = '',
                      ) -> Dict[str, any]:
         """
         ?????????????????
@@ -931,6 +954,8 @@ class ModelEvaluator:
                 future_steps=future_steps,
                 rollout_cfg=rollout_cfg,
                 scenario_data=scenario_payload,
+                history_cycles=history_cycles,
+                cell_id=cell_id,
             )
 
         logger.warning("  ??????????????")
@@ -950,13 +975,17 @@ def main():
                        choices=['hold_last', 'linear_trend', 'scenario_driven', 'hybrid_default'],
                        help='???????')
     parser.add_argument('--scenario_data', type=str, default=None,
-                       help='??????? (.json/.npy/.npz/.parquet)')
+                       help='?????? (.json/.npy/.npz/.parquet)')
     parser.add_argument('--nominal_capacity_ah', type=float, default=None,
                        help='?? Ah ????????? (Ah)')
     parser.add_argument('--step_duration_h', type=float, default=1.0,
-                       help='?????????? (h)')
+                       help='???????? (h)')
     parser.add_argument('--delta_ah_per_step', type=float, default=None,
-                       help='??????? Ah ??????????')
+                       help='?? Ah ??????????')
+    parser.add_argument('--cell_id', type=str, default='',
+                       help='???????? ID')
+    parser.add_argument('--history_cycles', type=int, default=200,
+                       help='????????')
     parser.add_argument('--output_dir', type=str, default=None,
                        help='??????')
     args = parser.parse_args()
@@ -999,6 +1028,8 @@ def main():
         output_dir=args.output_dir,
         rollout_cfg=rollout_cfg,
         scenario_data=args.scenario_data,
+        history_cycles=args.history_cycles,
+        cell_id=args.cell_id,
     )
     ModelEvaluator.print_summary(result)
 
