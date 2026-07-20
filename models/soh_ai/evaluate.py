@@ -782,12 +782,20 @@ class ModelEvaluator:
                 else:
                     window = archive[archive.files[0]].astype(np.float32)
             elif suffix == '.parquet':
+                fname = path_obj.name.lower()
+                # test.parquet 等已缩放 → 回退到 feature_table.parquet (原始物理值)
+                if fname in {'train.parquet', 'val.parquet', 'test.parquet'}:
+                    raw_path = path_obj.parent / 'feature_table.parquet'
+                    if raw_path.exists():
+                        path_obj = raw_path  # 切换到未缩放数据源
                 df = pd.read_parquet(path_obj)
                 if 'cell_id' in df.columns:
                     target_cell = cell_id if cell_id else str(df['cell_id'].iloc[-1])
                     df = df[df['cell_id'] == target_cell]
                 df = df.sort_values('cycle_index') if 'cycle_index' in df.columns else df
-                feature_cols_path = path_obj.parent / 'feature_columns.json'
+                feature_cols_path = path_obj.parent.parent / 'processed' / 'feature_columns.json'
+                if not feature_cols_path.exists():
+                    feature_cols_path = path_obj.parent / 'feature_columns.json'
                 if feature_cols_path.exists():
                     with open(feature_cols_path, 'r', encoding='utf-8') as fh:
                         feature_cols = json.load(fh)
@@ -898,7 +906,7 @@ class ModelEvaluator:
         """SOH ???????"""
         context = self._load_history_context(window_data, history_cycles=history_cycles, cell_id=cell_id)
         X_window = self._load_window(window_data, history_cycles=history_cycles, cell_id=cell_id)
-        x_scaler = None if context.get('input_is_scaled') else self._load_scaler()
+        x_scaler = self._load_scaler()  # 始终用 scaler，数据已保证是原始物理值
         scenario_payload = rollout_cfg.scenario if rollout_cfg and rollout_cfg.scenario is not None else scenario_data
         future_pred = self.rollout_sequence(
             ensemble_or_model,
