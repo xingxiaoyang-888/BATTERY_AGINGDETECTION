@@ -758,7 +758,10 @@ class ModelEvaluator:
                 else:
                     window = archive[archive.files[0]].astype(np.float32)
             elif suffix == '.parquet':
-                window = pd.read_parquet(path_obj).to_numpy(dtype=np.float32)
+                df = pd.read_parquet(path_obj)
+                # 只取数值列，排除 cell_id / chemistry 等字符串列
+                numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+                window = df[numeric_cols].to_numpy(dtype=np.float32)
             else:
                 raise ValueError(f'??????????: {path_obj}')
 
