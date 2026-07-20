@@ -705,10 +705,11 @@ class ModelEvaluator:
                          steps: int,
                          mask: np.ndarray = None,
                          rollout_cfg: CovariateRolloutConfig = None,
-                         scenario_data=None) -> np.ndarray:
-        """?????????????"""
+                         scenario_data=None,
+                         x_scaler=None) -> np.ndarray:
+        """自回归推演：逐步预测 SOH 并更新协变量滑动窗口"""
         if steps <= 0:
-            raise ValueError('steps ???? 0')
+            raise ValueError('steps 必须 > 0')
 
         current = np.asarray(X_window, dtype=np.float32).copy()
         preds = []
@@ -716,8 +717,13 @@ class ModelEvaluator:
         scenario = self._load_rollout_scenario(scenario_data, steps).as_step_arrays(steps)
 
         for step_idx in range(steps):
-            pred_value = self._predict_next_soh(model, current, mask=mask)
+            # 模型输入需要归一化（SOH 列保持原值，其余列用 scaler 缩放）
+            model_input = current.copy()
+            if x_scaler is not None:
+                model_input[:, 1:] = x_scaler.transform(current[:, 1:])
+            pred_value = self._predict_next_soh(model, model_input, mask=mask)
             preds.append(pred_value)
+            # 协变量更新在原始物理空间进行
             current = self._apply_covariate_strategy(current, step_idx, pred_value, cfg, scenario)
             if mask is not None:
                 mask = np.concatenate([mask[1:], np.ones_like(mask[:1])], axis=0)
@@ -760,23 +766,37 @@ class ModelEvaluator:
             elif suffix == '.parquet':
                 import json
                 df = pd.read_parquet(path_obj)
+                # 按 cell_id 分组，取最后一个电芯的最后 32 步作为窗口
+                if 'cell_id' in df.columns:
+                    last_cell = df['cell_id'].iloc[-1]
+                    df = df[df['cell_id'] == last_cell]
+                df = df.tail(32)  # 取最后 32 个循环 = 模型窗口大小
                 # 从 feature_columns.json 读取训练用的特征列，确保维度匹配
                 col_file = Path(path_obj).parent / 'feature_columns.json'
                 if col_file.exists():
                     with open(col_file) as f:
                         feature_cols = json.load(f)
-                    # 过滤掉 df 中不存在的列
                     feature_cols = [c for c in feature_cols if c in df.columns]
                 else:
-                    # fallback: 只取数值列
                     feature_cols = df.select_dtypes(include=['number']).columns.tolist()
                 window = df[feature_cols].to_numpy(dtype=np.float32)
             else:
                 raise ValueError(f'??????????: {path_obj}')
 
         if window.ndim != 2:
-            raise ValueError(f'window_data ?????????? shape={window.shape}')
+            raise ValueError(f'window_data 形状错误: {window.shape}')
         return window
+
+    @staticmethod
+    def _load_scaler() -> Optional[object]:
+        """加载 X 特征标准化器（如可用）"""
+        from models.soh_ai.config import WEIGHTS_DIR
+        scaler_path = Path(WEIGHTS_DIR) / 'soh_scalers.pkl'
+        if scaler_path.exists():
+            import joblib
+            scalers = joblib.load(scaler_path)
+            return scalers.get('X', None)
+        return None
 
     def predict_future_soh(self,
                            ensemble_or_model,
@@ -785,9 +805,13 @@ class ModelEvaluator:
                            mask: np.ndarray = None,
                            rollout_cfg: CovariateRolloutConfig = None,
                            scenario_data=None) -> Dict[str, any]:
-        """????????????????"""
+        """SOH 未来轨迹推演"""
         X_window = self._load_window(window_data)
-        future_pred = self.rollout_sequence(ensemble_or_model, X_window, future_steps, mask=mask, rollout_cfg=rollout_cfg, scenario_data=scenario_data)
+        # 加载 scaler（如可用）
+        x_scaler = self._load_scaler()
+        future_pred = self.rollout_sequence(ensemble_or_model, X_window, future_steps,
+                                            mask=mask, rollout_cfg=rollout_cfg,
+                                            scenario_data=scenario_data, x_scaler=x_scaler)
         future_pred = np.asarray(future_pred, dtype=np.float32).reshape(-1)
 
         start_soh = float(X_window[-1, 0]) if X_window.shape[1] > 0 else float('nan')
