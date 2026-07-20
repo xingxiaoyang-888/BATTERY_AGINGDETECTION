@@ -759,9 +759,11 @@ class ModelEvaluator:
                 return int(state_dict[key].shape[-1])
         return int(fallback)
 
-    @staticmethod
-    def _load_window(window_data: Union[str, Path, np.ndarray, pd.DataFrame], history_cycles: int = 200) -> np.ndarray:
-        """???????parquet ???????????????????? 32 ??"""
+    @classmethod
+    def _load_window(cls, window_data: Union[str, Path, np.ndarray, pd.DataFrame],
+                     history_cycles: int = 200,
+                     cell_id: str = "") -> np.ndarray:
+        """??????????????? 32 ??"""
         if isinstance(window_data, pd.DataFrame):
             window = window_data.to_numpy(dtype=np.float32)
         elif isinstance(window_data, np.ndarray):
@@ -782,10 +784,10 @@ class ModelEvaluator:
             elif suffix == '.parquet':
                 df = pd.read_parquet(path_obj)
                 if 'cell_id' in df.columns:
-                    last_cell = df['cell_id'].iloc[-1]
-                    df = df[df['cell_id'] == last_cell]
-                df = df.tail(history_cycles)
-                feature_cols_path = Path(path_obj).parent / 'feature_columns.json'
+                    target_cell = cell_id if cell_id else str(df['cell_id'].iloc[-1])
+                    df = df[df['cell_id'] == target_cell]
+                df = df.sort_values('cycle_index') if 'cycle_index' in df.columns else df
+                feature_cols_path = path_obj.parent / 'feature_columns.json'
                 if feature_cols_path.exists():
                     with open(feature_cols_path, 'r', encoding='utf-8') as fh:
                         feature_cols = json.load(fh)
@@ -795,19 +797,87 @@ class ModelEvaluator:
                     feature_cols = [c for c in ACTUAL_FEATURE_COLUMNS if c in df.columns]
                     if not feature_cols:
                         feature_cols = df.select_dtypes(include=['number']).columns.tolist()
-                window = df[feature_cols].to_numpy(dtype=np.float32)
+                window = df[feature_cols].tail(32).to_numpy(dtype=np.float32)
             else:
                 raise ValueError(f'??????????: {path_obj}')
 
         if window.ndim != 2:
             raise ValueError(f'window_data ????: {window.shape}')
-        if window.shape[0] > 32:
-            return window[-32:]
-        return window
+        return window[-32:] if window.shape[0] > 32 else window
+
+    @classmethod
+    def _load_history_context(cls, window_data: Union[str, Path, np.ndarray, pd.DataFrame],
+                              history_cycles: int = 200,
+                              cell_id: str = "") -> Dict[str, any]:
+        """??????????????"""
+        context = {
+            'history_cycle_indices': None,
+            'history_soh': None,
+            'resolved_cell_id': cell_id or '',
+            'input_is_scaled': False,
+        }
+
+        if isinstance(window_data, pd.DataFrame):
+            df = window_data.copy()
+            if 'cell_id' in df.columns and cell_id:
+                df = df[df['cell_id'] == cell_id]
+                context['resolved_cell_id'] = cell_id
+            if 'cycle_index' in df.columns:
+                df = df.sort_values('cycle_index')
+            df = df.tail(history_cycles)
+            context['history_cycle_indices'] = df['cycle_index'].to_numpy() if 'cycle_index' in df.columns else np.arange(1, len(df) + 1)
+            context['history_soh'] = df['soh'].to_numpy(dtype=np.float32) if 'soh' in df.columns else None
+            return context
+
+        if isinstance(window_data, np.ndarray):
+            arr = np.asarray(window_data, dtype=np.float32)
+            context['history_cycle_indices'] = np.arange(1, arr.shape[0] + 1)
+            context['history_soh'] = arr[:, 0] if arr.shape[1] > 0 else None
+            return context
+
+        path_obj = Path(window_data)
+        suffix = path_obj.suffix.lower()
+        if suffix == '.parquet':
+            df = pd.read_parquet(path_obj)
+            split_name = path_obj.name.lower()
+            context['input_is_scaled'] = split_name in {'train.parquet', 'val.parquet', 'test.parquet'}
+
+            if 'cell_id' in df.columns:
+                if cell_id:
+                    df = df[df['cell_id'] == cell_id]
+                    context['resolved_cell_id'] = cell_id
+                else:
+                    context['resolved_cell_id'] = str(df['cell_id'].iloc[-1])
+                    df = df[df['cell_id'] == context['resolved_cell_id']]
+
+            if 'cycle_index' in df.columns:
+                df = df.sort_values('cycle_index')
+
+            history_df = df.tail(history_cycles)
+            if split_name in {'train.parquet', 'val.parquet', 'test.parquet'}:
+                feature_table = path_obj.parent / 'feature_table.parquet'
+                if feature_table.exists():
+                    full_df = pd.read_parquet(feature_table)
+                    if 'cell_id' in full_df.columns and context['resolved_cell_id']:
+                        full_df = full_df[full_df['cell_id'] == context['resolved_cell_id']]
+                    if 'cycle_index' in full_df.columns:
+                        full_df = full_df.sort_values('cycle_index')
+                    history_df = full_df.tail(history_cycles)
+                    context['input_is_scaled'] = True
+
+            context['history_cycle_indices'] = history_df['cycle_index'].to_numpy() if 'cycle_index' in history_df.columns else np.arange(1, len(history_df) + 1)
+            context['history_soh'] = history_df['soh'].to_numpy(dtype=np.float32) if 'soh' in history_df.columns else None
+            return context
+
+        # npy / npz 的 fallback
+        window = cls._load_window(window_data, history_cycles=history_cycles)
+        context['history_cycle_indices'] = np.arange(1, window.shape[0] + 1)
+        context['history_soh'] = window[:, 0] if window.shape[1] > 0 else None
+        return context
 
     @staticmethod
     def _load_scaler() -> Optional[object]:
-        """加载 X 特征标准化器（如可用）"""
+        """?? X ???????????"""
         from models.soh_ai.config import WEIGHTS_DIR
         scaler_path = Path(WEIGHTS_DIR) / 'soh_scalers.pkl'
         if scaler_path.exists():
@@ -826,12 +896,19 @@ class ModelEvaluator:
                            history_cycles: int = 200,
                            cell_id: str = "") -> Dict[str, any]:
         """SOH ???????"""
-        X_window = self._load_window(window_data, history_cycles=history_cycles)
-        x_scaler = self._load_scaler()
+        context = self._load_history_context(window_data, history_cycles=history_cycles, cell_id=cell_id)
+        X_window = self._load_window(window_data, history_cycles=history_cycles, cell_id=cell_id)
+        x_scaler = None if context.get('input_is_scaled') else self._load_scaler()
         scenario_payload = rollout_cfg.scenario if rollout_cfg and rollout_cfg.scenario is not None else scenario_data
-        future_pred = self.rollout_sequence(ensemble_or_model, X_window, future_steps,
-                                            mask=mask, rollout_cfg=rollout_cfg,
-                                            scenario_data=scenario_payload, x_scaler=x_scaler)
+        future_pred = self.rollout_sequence(
+            ensemble_or_model,
+            X_window,
+            future_steps,
+            mask=mask,
+            rollout_cfg=rollout_cfg,
+            scenario_data=scenario_payload,
+            x_scaler=x_scaler,
+        )
         future_pred = np.asarray(future_pred, dtype=np.float32).reshape(-1)
 
         start_soh = float(X_window[-1, 0]) if X_window.shape[1] > 0 else float('nan')
@@ -841,15 +918,17 @@ class ModelEvaluator:
             'start_soh': start_soh,
             'future_soh': future_pred,
             'end_soh': float(future_pred[-1]) if len(future_pred) else start_soh,
+            'history_cycle_indices': context['history_cycle_indices'],
+            'history_soh': context['history_soh'],
+            'resolved_cell_id': context['resolved_cell_id'],
         }
 
-        if X_window.shape[0] > 0:
-            cycle_indices = np.arange(1, X_window.shape[0] + 1)
+        if context['history_cycle_indices'] is not None and context['history_soh'] is not None:
             fig = self.vis.plot_trajectory(
-                cycle_indices=cycle_indices,
-                true_soh=X_window[:, 0],
+                cycle_indices=np.asarray(context['history_cycle_indices']),
+                true_soh=np.asarray(context['history_soh']),
                 future_pred=future_pred,
-                cell_id=cell_id,
+                cell_id=context['resolved_cell_id'],
                 model_name='FutureRollout',
                 save=True,
             )
@@ -883,7 +962,6 @@ class ModelEvaluator:
 
         print("=" * 60)
 
-    @classmethod
     @classmethod
     def from_trained(cls,
                      weights_dir: str = None,
@@ -929,7 +1007,13 @@ class ModelEvaluator:
         if xgb_path.exists():
             ensemble.register('xgb', XGBoostWrapper.load(str(xgb_path)))
         if lstm_path.exists():
-            lstm_state = torch.load(str(lstm_path), map_location='cpu')
+            # 优先加载 best checkpoint
+            best_path = lstm_path.parent / 'checkpoints' / 'lstm_attention_best.pt'
+            load_path = best_path if best_path.exists() else lstm_path
+            lstm_state = torch.load(str(load_path), map_location='cpu')
+            # 兼容 checkpoint dict vs 纯 state_dict
+            if 'model_state_dict' in lstm_state:
+                lstm_state = lstm_state['model_state_dict']
             lstm_input_dim = evaluator._infer_input_dim(lstm_state, len(ACTUAL_FEATURE_COLUMNS))
             m = BiLSTMAttention(input_dim=lstm_input_dim)
             m.load_state_dict(lstm_state)
