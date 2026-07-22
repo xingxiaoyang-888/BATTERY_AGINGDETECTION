@@ -57,7 +57,7 @@ from .config import (
     TrainingConfig, TRAIN_CFG,
     InferenceConfig, INFER_CFG,
     DataQualityConfig, DQ_CFG,
-    PROCESSED_DATA_DIR, WEIGHTS_DIR,
+    PROCESSED_DATA_DIR, SODIUM_RAW_DATA_DIR, WEIGHTS_DIR,
 )
 
 # ── 数据管线 ──
@@ -109,6 +109,7 @@ __all__ = [
     'InferenceConfig', 'INFER_CFG',
     'DataQualityConfig', 'DQ_CFG',
     'PROCESSED_DATA_DIR', 'WEIGHTS_DIR',
+    'SODIUM_RAW_DATA_DIR',
     # Data Pipeline
     'SOHDataPipeline',
     'CycleFeatureExtractor',

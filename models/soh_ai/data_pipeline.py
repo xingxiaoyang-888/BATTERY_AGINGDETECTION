@@ -85,7 +85,7 @@ class CycleFeatureExtractor:
         features = {}
         cumulative_ah = np.cumsum([max(0.0, float(c.discharge_capacity_ah or 0.0)) for c in cell.cycles])
 
-        # --- A. ???????????? ---
+        # --- A. 当前状态特征 ---
         soh_series = cell.soh_series  # shape: (n_cycles,)
         for i, cycle in enumerate(cell.cycles):
             features.setdefault('soh', [None] * n_cycles)[i] = soh_series[i]
@@ -93,13 +93,6 @@ class CycleFeatureExtractor:
             features.setdefault('cumulative_ah_throughput', [None] * n_cycles)[i] = cumulative_ah[i]
             features.setdefault('internal_resistance', [None] * n_cycles)[i] = cycle.dc_resistance_ohm
             features.setdefault('coulombic_efficiency', [None] * n_cycles)[i] = cycle.coulombic_efficiency
-
-        # --- B. ???? ---
-        for i, cycle in enumerate(cell.cycles):
-            features.setdefault('temperature_c', [None] * n_cycles)[i] = cycle.temperature_c
-            features.setdefault('c_rate_charge', [None] * n_cycles)[i] = cycle.c_rate_charge
-            features.setdefault('c_rate_discharge', [None] * n_cycles)[i] = cycle.c_rate_discharge
-            features.setdefault('rest_time_h', [None] * n_cycles)[i] = cycle.rest_time_h
 
         # --- B. 工况特征 ---
         for i, cycle in enumerate(cell.cycles):
@@ -146,24 +139,36 @@ class CycleFeatureExtractor:
 
         # 构建最终 DataFrame
         result_df = pd.DataFrame(features)
+        for col in df_temp.columns:
+            if col not in result_df.columns:
+                result_df[col] = df_temp[col].values
         result_df.insert(0, 'cell_id', cell.cell_id)
         result_df.insert(1, 'chemistry', cell.chemistry)
+        result_df.insert(2, 'dataset_id', cell.metadata.get('dataset_id', 'wenzhou-sodium-ion'))
+        result_df.insert(3, 'nominal_capacity_ah', cell.nominal_capacity_ah)
+        for col in result_df.columns:
+            if col not in {'cell_id', 'chemistry', 'dataset_id'}:
+                result_df[col] = pd.to_numeric(result_df[col], errors='coerce')
 
         return result_df
 
     def _diff(self, arr: np.ndarray, lag: int = 1) -> np.ndarray:
         """计算滞后差分（前面填充 NaN）"""
-        result = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) > lag:
-            result[lag:] = arr[lag:] - arr[:-lag]
+        numeric = pd.to_numeric(pd.Series(arr), errors='coerce').to_numpy(dtype=float)
+        result = np.full(numeric.shape, np.nan, dtype=float)
+        if len(numeric) > lag:
+            result[lag:] = numeric[lag:] - numeric[:-lag]
         return result
 
     def _rolling_mean(self, arr: np.ndarray, window: int = 5) -> np.ndarray:
         """滚动均值（前面用较小的窗口）"""
-        result = np.full_like(arr, np.nan, dtype=float)
-        for i in range(len(arr)):
+        numeric = pd.to_numeric(pd.Series(arr), errors='coerce').to_numpy(dtype=float)
+        result = np.full(numeric.shape, np.nan, dtype=float)
+        for i in range(len(numeric)):
             start = max(0, i - window + 1)
-            result[i] = np.nanmean(arr[start:i+1])
+            window_values = numeric[start:i+1]
+            if np.isfinite(window_values).any():
+                result[i] = np.nanmean(window_values)
         return result
 
     def _rolling_decay_rate(self, arr: np.ndarray, window: int = 10) -> np.ndarray:
@@ -171,9 +176,10 @@ class CycleFeatureExtractor:
         计算滚动指数衰减率
         对 log(SOH) vs cycle 做线性拟合，返回斜率
         """
-        result = np.full_like(arr, np.nan, dtype=float)
-        for i in range(window, len(arr)):
-            y = arr[max(0, i-window):i+1]
+        numeric = pd.to_numeric(pd.Series(arr), errors='coerce').to_numpy(dtype=float)
+        result = np.full(numeric.shape, np.nan, dtype=float)
+        for i in range(window, len(numeric)):
+            y = numeric[max(0, i-window):i+1]
             x = np.arange(len(y))
             # 只对有效数据拟合
             valid = ~np.isnan(y) & (y > 0)
@@ -214,9 +220,28 @@ class CycleFeatureExtractor:
 
         需要原始 V-Q 数据，没有则返回空字典（后续用 NaN 填充）
         """
-        features = {}
-        # 这些特征需要原始充放电曲线的 V-Q 数据
-        # 如果没有原始曲线数据，返回空（后续由 data_quality 模块处理 NaN）
+        features = {
+            'mean_charge_voltage': cycle.mean_charge_voltage_v or np.nan,
+            'mean_discharge_voltage': cycle.mean_discharge_voltage_v or np.nan,
+        }
+        if cycle.mean_charge_voltage_v and cycle.mean_discharge_voltage_v:
+            features['voltage_hysteresis'] = (
+                cycle.mean_charge_voltage_v - cycle.mean_discharge_voltage_v
+            )
+
+        curve = cycle.discharge_curve
+        if curve is None or not {'V', 'Q'}.issubset(curve.columns):
+            return features
+
+        clean = curve[['V', 'Q']].replace([np.inf, -np.inf], np.nan).dropna()
+        clean = clean.sort_values('V').drop_duplicates('V')
+        if len(clean) < 5:
+            return features
+        dq_dv = np.gradient(clean['Q'].to_numpy(dtype=float), clean['V'].to_numpy(dtype=float))
+        if np.isfinite(dq_dv).any():
+            peak_idx = int(np.nanargmax(np.abs(dq_dv)))
+            features['dq_dv_peak_shift'] = float(clean['V'].iloc[peak_idx])
+            features['dq_dv_peak_height_ratio'] = float(abs(dq_dv[peak_idx]))
         return features
 
 
@@ -282,25 +307,50 @@ class DataCleaner:
         if 'soh' in df.columns:
             df = self._detect_capacity_jumps(df)
 
-        # Step 7: 前向/后向填充剩余缺失值
-        # 按电芯分组填充（保持电芯独立性）
+        # Step 7: 仅用历史值前向填充，避免未来循环信息泄漏到当前循环。
         if 'cell_id' in df.columns:
-            fill_cols = [c for c in df.columns if c not in ['cell_id', 'chemistry', 'soh_raw']]
+            fill_cols = [c for c in df.columns
+                         if c not in ['cell_id', 'chemistry', 'dataset_id', 'soh_raw']]
             for col in fill_cols:
                 if df[col].isnull().any():
                     df[col] = df.groupby('cell_id')[col].transform(
-                        lambda x: x.ffill().bfill()
+                        lambda x: x.ffill()
                     )
         else:
-            df = df.ffill().bfill()
+            df = df.ffill()
 
         # 最终检查：仍有 NaN 的列用 0 填充
         df = df.fillna(0)
 
         self.quality_report['final_shape'] = df.shape
         self.quality_report['final_nan_count'] = df.isnull().sum().sum()
+        self.quality_report['chemistry_counts'] = df.groupby('chemistry')['cell_id'].nunique().to_dict()
+        if 'dataset_id' in df.columns:
+            self.quality_report['dataset_counts'] = df.groupby('dataset_id')['cell_id'].nunique().to_dict()
+        self.quality_report['physical_ranges'] = self._physical_ranges(df)
 
         return df
+
+    @staticmethod
+    def _physical_ranges(df: pd.DataFrame) -> Dict[str, Dict[str, float]]:
+        tracked = [
+            'soh', 'nominal_capacity_ah', 'temperature_c',
+            'c_rate_charge', 'c_rate_discharge', 'internal_resistance',
+            'coulombic_efficiency',
+        ]
+        ranges = {}
+        for col in tracked:
+            if col not in df.columns:
+                continue
+            values = pd.to_numeric(df[col], errors='coerce').replace([np.inf, -np.inf], np.nan).dropna()
+            if values.empty:
+                continue
+            ranges[col] = {
+                'min': float(values.min()),
+                'max': float(values.max()),
+                'median': float(values.median()),
+            }
+        return ranges
 
     def _handle_outliers(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -310,11 +360,17 @@ class DataCleaner:
         """
         outlier_count = 0
         numeric_cols = df.select_dtypes(include=[np.number]).columns
+        bounded_cols = {
+            'soh', 'coulombic_efficiency', 'soc_min', 'soc_max', 'soc_mean',
+            'c_rate_charge', 'c_rate_discharge', 'temperature_c',
+        }
 
         for col in numeric_cols:
             if col in ['cell_id', 'chemistry', 'cycle_index']:
                 continue
             if df[col].isnull().all():
+                continue
+            if col in bounded_cols:
                 continue
 
             # 按电芯分组处理
@@ -325,8 +381,8 @@ class DataCleaner:
                     vals = df.loc[mask, col]
                     if len(vals) < 10:
                         continue
-                    rolling_med = vals.rolling(window=10, center=True, min_periods=3).median()
-                    rolling_std = vals.rolling(window=10, center=True, min_periods=3).std()
+                    rolling_med = vals.rolling(window=10, min_periods=3).median()
+                    rolling_std = vals.rolling(window=10, min_periods=3).std()
                     deviation = np.abs(vals - rolling_med)
                     is_outlier = deviation > self.cfg.max_outlier_std * rolling_std
                     n_outliers = is_outlier.sum()
@@ -341,11 +397,11 @@ class DataCleaner:
         return df
 
     def _smooth_soh(self, series: pd.Series, window: int = 5) -> pd.Series:
-        """Savitzky-Golay 风格平滑（保留趋势，去噪）"""
+        """因果中值滤波与 EMA 平滑，不使用未来循环。"""
         if len(series) < window:
             return series
         # 使用中值滤波 + EMA 组合平滑
-        median_smoothed = series.rolling(window=window, center=True, min_periods=1).median()
+        median_smoothed = series.rolling(window=window, min_periods=1).median()
         # EMA: S_t = α*x_t + (1-α)*S_{t-1}
         alpha = 2.0 / (window + 1)
         ema = median_smoothed.copy()
@@ -424,7 +480,8 @@ class SequenceBuilder:
             # 优先使用配置里定义的真实输入列，避免把趋势/标签/派生列误喂给模型
             feature_cols = [c for c in FEATURE_CFG.all_features if c in df.columns]
             if not feature_cols:
-                exclude = ['cell_id', 'chemistry', 'cycle_index', 'soh_raw', 'soh_jump_flag', target_col]
+                exclude = ['cell_id', 'chemistry', 'dataset_id', 'cycle_index',
+                           'soh_raw', 'soh_jump_flag', target_col]
                 feature_cols = [c for c in df.columns if c not in exclude and df[c].dtype in ('float64', 'float32', 'int64', 'int32')]
         # 确保目标列可用
         if target_col not in df.columns:
@@ -597,6 +654,126 @@ class DataSplitter:
             'test':  df.iloc[n_train + n_val:],
         }
 
+    # ── 化学体系感知划分 ─────────────────────────────────
+    def split_by_chemistry(self, df: pd.DataFrame,
+                           target_chemistry: str = "sodium-ion",
+                           random_state: int = None) -> Dict[str, any]:
+        """
+        跨化学体系的迁移学习数据划分。
+
+        核心原则:
+          1. 目标域 (target, 如 sodium-ion) 的全部电芯用于 train/val/test —
+             绝不让目标域数据混入源域预训练集
+          2. 源域 (source, 如 lithium-ion) 的全部电芯用于 pretrain —
+             作为迁移学习的预训练语料
+          3. 源域数据量 >> 目标域时，源域内部做 train/val 划分用于
+             预训练阶段的 early stopping
+
+        Args:
+            df: 特征 DataFrame，必须包含 'cell_id' 和 'chemistry' 列
+            target_chemistry: 目标化学体系标识
+            random_state: 随机种子
+
+        Returns:
+            {
+                'pretrain': DataFrame | None,   # 源域预训练数据 (源域全部电芯)
+                'train': DataFrame,             # 目标域训练集
+                'val': DataFrame,               # 目标域验证集
+                'test': DataFrame,              # 目标域测试集
+                'source_chemistry': str,        # 源域化学体系名 (如 "lithium-ion")
+                'target_chemistry': str,        # 目标域化学体系名
+                'source_cells': List[str],      # 源域电芯 ID 列表
+                'target_cells': List[str],      # 目标域电芯 ID 列表
+                'is_cross_chemistry': bool,     # 是否为跨化学体系迁移学习
+            }
+        """
+        random_state = random_state or self.cfg.seed
+
+        if 'chemistry' not in df.columns:
+            logger.warning("  DataFrame 缺少 'chemistry' 列，回退到普通划分")
+            splits = self.split(df, random_state=random_state)
+            splits['pretrain'] = None
+            splits['source_chemistry'] = None
+            splits['target_chemistry'] = target_chemistry
+            splits['source_cells'] = []
+            splits['target_cells'] = list(df['cell_id'].unique())
+            splits['is_cross_chemistry'] = False
+            return splits
+
+        # 1. 按化学体系分拆电芯
+        chemistries = df['chemistry'].unique()
+        logger.info(f"  检测到化学体系: {chemistries.tolist()}")
+
+        target_mask = df['chemistry'] == target_chemistry
+        target_df = df[target_mask].copy()
+        source_df = df[~target_mask].copy()
+
+        target_cells = target_df['cell_id'].unique().tolist() if len(target_df) > 0 else []
+        source_cells = source_df['cell_id'].unique().tolist() if len(source_df) > 0 else []
+
+        logger.info(f"  目标域 ({target_chemistry}): {len(target_cells)} 个电芯 — {target_cells}")
+        logger.info(f"  源域: {len(source_cells)} 个电芯")
+
+        is_cross = len(source_cells) > 0 and len(target_cells) > 0
+
+        if not is_cross:
+            # 只有一种化学体系 → 普通划分
+            logger.info("  单一化学体系，使用普通划分")
+            splits = self.split(df, random_state=random_state)
+            splits['pretrain'] = None
+            splits['source_chemistry'] = None
+            splits['target_chemistry'] = target_chemistry
+            splits['source_cells'] = []
+            splits['target_cells'] = target_cells if target_cells else source_cells
+            splits['is_cross_chemistry'] = False
+            return splits
+
+        # 2. 源域: 全部用于预训练（内部做 train/val 分以支持 early stopping）
+        source_chemistry_name = source_df['chemistry'].iloc[0]
+        if len(source_cells) >= 4:
+            np.random.seed(random_state)
+            s_shuffled = np.random.permutation(source_cells)
+            n_s_train = int(len(source_cells) * 0.85)
+            s_train_cells = s_shuffled[:n_s_train]
+            s_val_cells = s_shuffled[n_s_train:]
+            pretrain_df = source_df[source_df['cell_id'].isin(s_train_cells)]
+            pretrain_val_df = source_df[source_df['cell_id'].isin(s_val_cells)]
+            logger.info(f"  源域预训练: train={len(s_train_cells)} 电芯, val={len(s_val_cells)} 电芯")
+        else:
+            pretrain_df = source_df
+            pretrain_val_df = None
+            logger.info(f"  源域预训练: {len(source_cells)} 电芯 (无独立验证集)")
+
+        # 3. 目标域: LOCO 划分 (钠电只有 3 个电芯，必须谨慎)
+        target_splits = self._leave_one_cell_out(target_df, np.array(target_cells), random_state)
+        # 如果 LOCO 返回的 train 里有目标域之外的 cell（不可能发生，但安全起见）
+        for key in ['train', 'val', 'test']:
+            if key in target_splits:
+                actual_cells = target_splits[key]['cell_id'].unique().tolist()
+                foreign = [c for c in actual_cells if c not in target_cells]
+                if foreign:
+                    logger.warning(f"  ⚠️ 目标域 {key} 集混入了非目标电芯: {foreign}，已清除")
+                    target_splits[key] = target_splits[key][
+                        target_splits[key]['cell_id'].isin(target_cells)
+                    ]
+
+        logger.info(f"  目标域划分: train={len(target_splits['train']['cell_id'].unique())} 电芯, "
+                   f"val={len(target_splits['val']['cell_id'].unique())} 电芯, "
+                   f"test={len(target_splits['test']['cell_id'].unique())} 电芯")
+
+        return {
+            'pretrain': pretrain_df,
+            'pretrain_val': pretrain_val_df,
+            'train': target_splits['train'],
+            'val': target_splits['val'],
+            'test': target_splits['test'],
+            'source_chemistry': source_chemistry_name,
+            'target_chemistry': target_chemistry,
+            'source_cells': source_cells,
+            'target_cells': target_cells,
+            'is_cross_chemistry': True,
+        }
+
 
 # ============================================================
 # Stage 5: 数据管线编排器
@@ -621,34 +798,55 @@ class SOHDataPipeline:
         self.quality_report: Dict = {}
 
     def run(self, cells: List[CellDegradationData],
-            save: bool = True) -> Dict[str, any]:
+            save: bool = True,
+            chemistry_aware: bool = False,
+            target_chemistry: str = "sodium-ion") -> Dict[str, any]:
         """
         执行完整数据管线
 
         Args:
             cells: CellDegradationData 列表
             save: 是否保存中间产物到磁盘
+            chemistry_aware: 是否启用化学体系感知模式（迁移学习场景）
+            target_chemistry: 目标化学体系标识（仅在 chemistry_aware=True 时生效）
 
         Returns:
+            普通模式:
             {
-                'feature_df': pd.DataFrame,       # 全量特征表
-                'splits': {'train': df, ...},     # 划分后的数据
-                'sequences': {'train': (X,y), ...},  # 序列样本
-                'scalers': {'X': scaler, 'y': scaler},  # 标准化器
-                'quality_report': dict,            # 数据质量报告
-                'feature_cols': list,              # 使用的特征列
+                'feature_df': pd.DataFrame,
+                'splits': {'train': df, ...},
+                'sequences': {'train': (X,y), ...},
+                'scalers': {'X': scaler, 'y': scaler},
+                'quality_report': dict,
+                'feature_cols': list,
+                'is_cross_chemistry': bool,
+            }
+            迁移学习模式 (chemistry_aware=True 且检测到多化学体系):
+            {
+                ... 以上所有字段 ...
+                'pretrain_sequences': {'train': (X,y), 'val': (X,y)|None},
+                'source_chemistry': str,
+                'target_chemistry': str,
+                'source_cells': List[str],
+                'target_cells': List[str],
+                'is_cross_chemistry': True,
             }
         """
         logger.info(f"━━━ SOH 数据管线启动 ─ {len(cells)} 个电芯 ━━━")
+        if chemistry_aware:
+            logger.info(f"  化学体系感知模式: target={target_chemistry}")
 
         # Stage 1: 特征提取
         logger.info("[Stage 1/5] 循环级特征提取...")
         all_features = []
+        chemistry_counts = {}
         for cell in cells:
             try:
                 cell_df = self.extractor.extract(cell)
                 all_features.append(cell_df)
-                logger.info(f"  ✓ {cell.cell_id}: {len(cell_df)} 个循环")
+                chem = cell.chemistry
+                chemistry_counts[chem] = chemistry_counts.get(chem, 0) + 1
+                logger.info(f"  ✓ {cell.cell_id} [{chem}]: {len(cell_df)} 个循环")
             except Exception as e:
                 logger.error(f"  ✗ {cell.cell_id}: {e}")
 
@@ -657,6 +855,10 @@ class SOHDataPipeline:
 
         feature_df = pd.concat(all_features, ignore_index=True)
         logger.info(f"  合并特征表: {feature_df.shape}")
+        logger.info(f"  化学体系分布: {chemistry_counts}")
+        foreign = feature_df.loc[feature_df['chemistry'] != target_chemistry, 'cell_id'].unique().tolist()
+        if not chemistry_aware and foreign:
+            raise ValueError(f"纯钠电管线混入非钠电电芯: {foreign}")
 
         # Stage 2: 数据清洗
         logger.info("[Stage 2/5] 数据清洗与质量检查...")
@@ -665,32 +867,82 @@ class SOHDataPipeline:
         logger.info(f"  清洗后: {clean_df.shape}, "
                    f"NaN 数: {clean_df.isnull().sum().sum()}")
 
+        # 判断是否触发跨化学体系模式
+        has_multiple_chem = (
+            chemistry_aware
+            and 'chemistry' in clean_df.columns
+            and clean_df['chemistry'].nunique() > 1
+        )
+
         # Stage 3: 数据划分
         logger.info("[Stage 3/5] 训练/验证/测试集划分...")
-        splits = self.splitter.split(clean_df)
+        if has_multiple_chem:
+            logger.info("  检测到多化学体系 → 启用跨域划分")
+            splits = self.splitter.split_by_chemistry(
+                clean_df, target_chemistry=target_chemistry
+            )
+        else:
+            if chemistry_aware:
+                logger.info("  单一化学体系 → 使用普通划分")
+            splits = self.splitter.split(clean_df)
+            splits['pretrain'] = None
+            splits['pretrain_val'] = None
+            splits['source_chemistry'] = None
+            splits['target_chemistry'] = target_chemistry
+            splits['source_cells'] = []
+            splits['target_cells'] = []
+            splits['is_cross_chemistry'] = False
+
+        is_cross = splits.get('is_cross_chemistry', False)
 
         # Stage 4: 标准化
         logger.info("[Stage 4/5] 特征标准化...")
-        scaled_splits = self._fit_scale(splits, clean_df)
+        if is_cross and splits.get('pretrain') is not None:
+            # 迁移学习模式: 用源域 (数据量大) 拟合 scaler，保证特征空间一致性
+            scaled_splits = self._fit_scale_cross_domain(splits, clean_df)
+        else:
+            scaled_splits = self._fit_scale(splits, clean_df)
 
         # Stage 5: 序列构建
         logger.info("[Stage 5/5] 序列窗口构建...")
         feature_cols = [c for c in clean_df.columns
-                       if c not in ['cell_id', 'chemistry', 'cycle_index',
+                       if c not in ['cell_id', 'chemistry', 'dataset_id', 'cycle_index',
                                     'soh_raw', 'soh_jump_flag']
                        and clean_df[c].dtype in ('float64', 'float32', 'int64', 'int32')]
 
         sequences = {}
         for split_name, sdf in scaled_splits.items():
+            # 跳过 pretrain DataFrame（它们在 scaled_splits 中以 'pretrain'/'pretrain_val' 键存在）
+            if split_name in ('pretrain', 'pretrain_val') or sdf is None:
+                continue
             X, y, _, _ = self.seq_builder.build_sequences(
                 sdf, feature_cols=feature_cols
             )
             sequences[split_name] = (X, y)
             logger.info(f"  {split_name}: X{X.shape}, y{y.shape}")
 
+        # 迁移学习模式额外构建源域序列
+        pretrain_sequences = None
+        if is_cross and splits.get('pretrain') is not None:
+            logger.info("  构建源域预训练序列...")
+            pretrain_sequences = {}
+            for key in ['pretrain', 'pretrain_val']:
+                sdf = scaled_splits.get(key)
+                if sdf is not None and len(sdf) > 0:
+                    X, y, _, _ = self.seq_builder.build_sequences(
+                        sdf, feature_cols=feature_cols
+                    )
+                    # 统一键名：pretrain → train, pretrain_val → val
+                    out_key = 'train' if key == 'pretrain' else 'val'
+                    pretrain_sequences[out_key] = (X, y)
+                    logger.info(f"  source_{out_key}: X{X.shape}, y{y.shape}")
+
         # 持久化
         if save:
-            self._save(clean_df, splits, feature_cols)
+            self._save(clean_df,
+                      {k: v for k, v in splits.items()
+                       if k in ('train', 'val', 'test') and v is not None},
+                      feature_cols)
 
         result = {
             'feature_df': clean_df,
@@ -699,9 +951,19 @@ class SOHDataPipeline:
             'scalers': self.scalers,
             'quality_report': self.quality_report,
             'feature_cols': feature_cols,
+            'is_cross_chemistry': is_cross,
+            'source_chemistry': splits.get('source_chemistry'),
+            'target_chemistry': splits.get('target_chemistry'),
+            'source_cells': splits.get('source_cells', []),
+            'target_cells': splits.get('target_cells', []),
         }
 
+        if is_cross and pretrain_sequences:
+            result['pretrain_sequences'] = pretrain_sequences
+
         logger.info("━━━ SOH 数据管线完成 ━━━")
+        if is_cross:
+            logger.info(f"  跨域迁移学习: 源域={splits.get('source_chemistry')} → 目标域={target_chemistry}")
         return result
 
     def _fit_scale(self, splits: Dict[str, pd.DataFrame],
@@ -718,7 +980,8 @@ class SOHDataPipeline:
         target_col = FEATURE_CFG.target_col
 
         # 确定需要标准化的特征列（排除目标列和元数据列）
-        exclude = ['cell_id', 'chemistry', 'cycle_index', 'soh_raw', 'soh_jump_flag', target_col]
+        exclude = ['cell_id', 'chemistry', 'dataset_id', 'cycle_index',
+                   'soh_raw', 'soh_jump_flag', target_col]
         feature_cols = [c for c in full_df.columns
                        if c not in exclude and full_df[c].dtype in ('float64', 'float32', 'int64', 'int32')]
 
@@ -731,6 +994,8 @@ class SOHDataPipeline:
         # 变换所有划分：X 标准化，y 保持原值
         scaled = {}
         for split_name, sdf in splits.items():
+            if not isinstance(sdf, pd.DataFrame):
+                continue
             sdf_scaled = sdf.copy()
             sdf_scaled[feature_cols] = x_scaler.transform(sdf[feature_cols].values)
             # y 不缩放：SOH 保留真实的 [0, 1] 物理值
@@ -738,6 +1003,58 @@ class SOHDataPipeline:
 
         logger.info(f"  特征标准化完成: {len(feature_cols)} 个特征列已缩放, "
                     f"SOH 保持原始物理域 [0, 1]")
+        return scaled
+
+    def _fit_scale_cross_domain(self, splits: Dict[str, any],
+                                full_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+        """
+        跨化学体系标准化 — 用源域数据拟合 scaler，统一变换源域和目标域。
+
+        设计原则:
+          - 源域 (lithium-ion, 数据量大) 拟合 RobustScaler → 提供鲁棒的
+            特征分布估计
+          - 同一 scaler 变换目标域 (sodium-ion) 数据 → 保证特征空间一致
+          - SOH 不缩放，保持物理域 [0, 1]
+          - 如果源域不可用，回退到目标域 train 集拟合
+        """
+        target_col = FEATURE_CFG.target_col
+        exclude = ['cell_id', 'chemistry', 'dataset_id', 'cycle_index',
+                   'soh_raw', 'soh_jump_flag', target_col]
+        feature_cols = [c for c in full_df.columns
+                       if c not in exclude and full_df[c].dtype in ('float64', 'float32', 'int64', 'int32')]
+
+        # 确定 scaler 拟合数据: 优先源域 (数据量大，分布更广)
+        fit_df = None
+        if splits.get('pretrain') is not None and len(splits['pretrain']) > 0:
+            fit_df = splits['pretrain']
+            logger.info(f"  使用源域数据拟合 scaler (n={len(fit_df)})")
+        elif splits.get('train') is not None and len(splits['train']) > 0:
+            fit_df = splits['train']
+            logger.info(f"  源域不可用，回退到目标域 train 拟合 scaler (n={len(fit_df)})")
+        else:
+            # 极端情况: 用全部数据
+            fit_df = full_df
+            logger.warning(f"  ⚠️ 无标准拟合数据，使用全量数据 (n={len(fit_df)})")
+
+        x_scaler = RobustScaler(quantile_range=(5, 95))
+        x_scaler.fit(fit_df[feature_cols].values)
+        self.scalers['X'] = x_scaler
+        self.scalers['y'] = None
+
+        # 变换所有 split（源域 + 目标域）
+        scaled = {}
+        all_split_keys = ['pretrain', 'pretrain_val', 'train', 'val', 'test']
+        for split_name in all_split_keys:
+            sdf = splits.get(split_name)
+            if sdf is None or len(sdf) == 0:
+                scaled[split_name] = None
+                continue
+            sdf_scaled = sdf.copy()
+            sdf_scaled[feature_cols] = x_scaler.transform(sdf[feature_cols].values)
+            scaled[split_name] = sdf_scaled
+
+        logger.info(f"  跨域标准化完成: scaler 基于源域拟合 → 统一变换源域+目标域 "
+                    f"({len(feature_cols)} 个特征列)")
         return scaled
 
     def _save(self, feature_df: pd.DataFrame,
