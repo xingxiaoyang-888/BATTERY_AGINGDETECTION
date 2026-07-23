@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import defaultdict
+from io import TextIOWrapper
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import BinaryIO, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -184,34 +186,212 @@ class MendeleyNFMLoader:
 
 
 class RWTHCommercialAgingLoader:
-    """RWTH 67 只商业钠电数据的受控入口。
-
-    官方整包尚未落地，当前无法对内部通道字段和循环聚合规则做实测验证。
-    因而这里采用失败关闭策略：目录为空时跳过；发现疑似整包数据时明确报错，
-    不用猜测字段生成可能错误的 SOH 标签。
-    """
+    """流式读取 RWTH 67 只商业钠电循环老化数据。"""
 
     DATASET_ID = "rwth-commercial-sib-aging-67"
-    DATA_SUFFIXES = {".csv", ".txt", ".parquet", ".pkl", ".pickle", ".mat", ".h5"}
+    NOMINAL_CAPACITY_AH = 1.2
+    CONDITION_PATTERN = re.compile(
+        r"^DOD(?P<dod>\d+)_(?P<charge>[\d.]+)C(?P<discharge>[\d.]+)C_"
+        r"(?P<temperature>-?\d+|RT)deg?C?$|"
+        r"^DOD(?P<dod_rt>\d+)_(?P<charge_rt>[\d.]+)C(?P<discharge_rt>[\d.]+)C_RT$"
+    )
+
+    @classmethod
+    def _condition_metadata(cls, condition: str) -> Dict[str, float]:
+        match = cls.CONDITION_PATTERN.match(condition)
+        if not match:
+            raise ValueError(f"无法识别 RWTH 循环工况: {condition}")
+        groups = match.groupdict()
+        dod = float(groups.get("dod") or groups.get("dod_rt")) / 100.0
+        charge = float(groups.get("charge") or groups.get("charge_rt"))
+        discharge = float(groups.get("discharge") or groups.get("discharge_rt"))
+        temperature_text = groups.get("temperature")
+        temperature = 25.0 if temperature_text in {None, "RT"} else float(temperature_text)
+        return {
+            "dod": dod,
+            "soc_min": 1.0 - dod,
+            "soc_max": 1.0,
+            "temperature_c": temperature,
+            "c_rate_charge": charge,
+            "c_rate_discharge": discharge,
+        }
+
+    @staticmethod
+    def _open_text(source: BinaryIO) -> TextIOWrapper:
+        return TextIOWrapper(source, encoding="utf-8", errors="replace", newline="")
+
+    @classmethod
+    def _read_ird(cls, source: BinaryIO, source_name: str) -> Tuple[pd.Timestamp, pd.DataFrame]:
+        text = cls._open_text(source)
+        start_time = None
+        for line in text:
+            if line.startswith("Starttime:"):
+                start_time = pd.to_datetime(line.split("'", 2)[1])
+            if line.startswith("###"):
+                break
+        if start_time is None:
+            raise ValueError(f"RWTH 文件缺少 Starttime: {source_name}")
+        frame = pd.read_csv(text)
+        expected = {"Time", "Voltage", "Current", "Ah_counter", "Temperature", "StepID"}
+        if frame.empty:
+            return start_time, frame
+        if set(frame.columns) != expected:
+            raise ValueError(f"RWTH 通道不匹配 {source_name}: {list(frame.columns)}")
+        for column in expected - {"Time"}:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frame["Time"] = pd.to_timedelta(frame["Time"], errors="coerce")
+        frame = frame.dropna(subset=["Time", "Voltage", "Current", "Ah_counter"])
+        return start_time, frame
+
+    @classmethod
+    def _capacity_segments(cls, frame: pd.DataFrame) -> List[Dict[str, float]]:
+        """提取连续恒流段；电流负值为放电，正值为充电。"""
+        if frame.empty:
+            return []
+        segments = []
+        for step_id, step in frame.groupby("StepID", sort=False):
+            current = step["Current"].median()
+            if not np.isfinite(current) or abs(current) < 0.02:
+                continue
+            duration_h = (step["Time"].iloc[-1] - step["Time"].iloc[0]).total_seconds() / 3600.0
+            capacity = abs(float(step["Ah_counter"].iloc[-1] - step["Ah_counter"].iloc[0]))
+            if duration_h <= 0 or capacity < 0.05:
+                continue
+            voltage = step["Voltage"].to_numpy(dtype=float)
+            amp_hours = step["Ah_counter"].to_numpy(dtype=float)
+            delta_ah = np.abs(np.diff(amp_hours))
+            mean_voltage = float(
+                np.sum((voltage[:-1] + voltage[1:]) * 0.5 * delta_ah) / delta_ah.sum()
+            ) if delta_ah.sum() > 0 else float(np.nanmean(voltage))
+            segments.append({
+                "step_id": int(step_id),
+                "direction": "discharge" if current < 0 else "charge",
+                "capacity_ah": capacity,
+                "mean_voltage_v": mean_voltage,
+                "mean_current_a": abs(float(current)),
+                "temperature_c": float(step["Temperature"].median()),
+                "duration_h": duration_h,
+            })
+        return segments
+
+    @classmethod
+    def _cycles_from_measurement(
+        cls, frame: pd.DataFrame, condition: str, start_time: pd.Timestamp,
+        file_kind: str, source_name: str,
+    ) -> List[CycleData]:
+        meta = cls._condition_metadata(condition)
+        segments = cls._capacity_segments(frame)
+        discharges = [item for item in segments if item["direction"] == "discharge"]
+        charges = [item for item in segments if item["direction"] == "charge"]
+        cycles = []
+        for discharge in discharges:
+            c_rate = discharge["mean_current_a"] / cls.NOMINAL_CAPACITY_AH
+            is_reference = 0.35 <= c_rate <= 0.65
+            is_aging_rate = abs(c_rate - meta["c_rate_discharge"]) <= max(0.15, 0.15 * meta["c_rate_discharge"])
+            if discharge["capacity_ah"] < 0.3:
+                continue
+            if file_kind == "cu" and not is_reference:
+                continue
+            if file_kind != "cu" and not (is_reference or is_aging_rate):
+                continue
+
+            nearest_charge = min(
+                charges,
+                key=lambda item: abs(item["step_id"] - discharge["step_id"]),
+                default=None,
+            )
+            charge_capacity = nearest_charge["capacity_ah"] if nearest_charge else 0.0
+            cycle_metadata = {
+                "dataset_id": cls.DATASET_ID,
+                "condition": condition,
+                "source_file": source_name,
+                "measurement_start": start_time.isoformat(),
+                "is_reference_capacity": is_reference,
+                "file_kind": file_kind,
+                "soc_min": meta["soc_min"],
+                "soc_max": meta["soc_max"],
+                "dod": meta["dod"],
+            }
+            cycles.append(CycleData(
+                cycle_index=0,
+                timestamp=start_time.timestamp(),
+                charge_capacity_ah=charge_capacity,
+                discharge_capacity_ah=discharge["capacity_ah"],
+                coulombic_efficiency=(
+                    discharge["capacity_ah"] / charge_capacity if charge_capacity > 0 else 0.0
+                ),
+                mean_charge_voltage_v=(nearest_charge["mean_voltage_v"] if nearest_charge else 0.0),
+                mean_discharge_voltage_v=discharge["mean_voltage_v"],
+                temperature_c=discharge["temperature_c"],
+                temp_max_c=discharge["temperature_c"],
+                temp_min_c=discharge["temperature_c"],
+                c_rate_charge=meta["c_rate_charge"],
+                c_rate_discharge=meta["c_rate_discharge"],
+                metadata=cycle_metadata,
+            ))
+        return cycles
+
+    @classmethod
+    def _load_zip(cls, archive_path: Path) -> List[CellDegradationData]:
+        import zipfile
+
+        by_cell: Dict[str, List[CycleData]] = defaultdict(list)
+        condition_by_cell: Dict[str, str] = {}
+        with zipfile.ZipFile(archive_path) as archive:
+            for info in archive.infolist():
+                if info.is_dir() or not info.filename.lower().endswith(".ird"):
+                    continue
+                parts = info.filename.split("/")
+                condition = parts[0]
+                if not condition.startswith("DOD"):
+                    continue
+                filename = parts[-1]
+                cell_id = filename.split("_", 1)[0].split(".", 1)[0]
+                file_kind = "cu" if "/CU_at_25degC/" in info.filename else "cycling"
+                try:
+                    with archive.open(info) as source:
+                        start_time, frame = cls._read_ird(source, info.filename)
+                    cycles = cls._cycles_from_measurement(
+                        frame, condition, start_time, file_kind, info.filename
+                    )
+                except (ValueError, pd.errors.ParserError) as exc:
+                    logger.warning("跳过 RWTH 文件 %s: %s", info.filename, exc)
+                    continue
+                by_cell[cell_id].extend(cycles)
+                condition_by_cell[cell_id] = condition
+
+        cells = []
+        for cell_id, cycles in sorted(by_cell.items()):
+            cycles.sort(key=lambda item: (item.timestamp or 0, item.metadata.get("source_file", "")))
+            for index, cycle in enumerate(cycles, start=1):
+                cycle.cycle_index = index
+            condition = condition_by_cell[cell_id]
+            cells.append(CellDegradationData(
+                cell_id=f"RWTH-{cell_id}",
+                chemistry="sodium-ion",
+                nominal_capacity_ah=cls.NOMINAL_CAPACITY_AH,
+                cycles=cycles,
+                metadata={
+                    "dataset_id": cls.DATASET_ID,
+                    "condition": condition,
+                    **cls._condition_metadata(condition),
+                },
+            ))
+        return cells
 
     @classmethod
     def load(cls, base_dir: str) -> List[CellDegradationData]:
         base = Path(base_dir)
         if not base.exists():
             return []
-        candidates = [
-            path for path in base.rglob("*")
-            if path.is_file()
-            and path.suffix.lower() in cls.DATA_SUFFIXES
-            and not re.search(r"read|helper|example", path.name, re.IGNORECASE)
-        ]
-        if not candidates:
+        archives = sorted(base.glob("*.zip"))
+        if not archives:
             logger.info("RWTH 整包尚未解压到 %s，本次跳过", base)
             return []
-        raise RuntimeError(
-            "检测到 RWTH 原始数据，但该数据源的字段映射尚未通过真实整包验证。"
-            "请先按 docs/sodium_server_training.md 完成结构核验，再启用 RWTH 训练。"
-        )
+        cells = cls._load_zip(archives[0])
+        if len(cells) != 67:
+            raise ValueError(f"RWTH 循环老化电芯应为 67 只，实际解析到 {len(cells)} 只")
+        return cells
 
 
 class SodiumDatasetLoader:

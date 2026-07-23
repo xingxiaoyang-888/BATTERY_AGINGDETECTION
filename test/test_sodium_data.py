@@ -140,11 +140,34 @@ class TestSodiumIsolation(unittest.TestCase):
         self.assertFalse(cell_sets[0] & cell_sets[2])
         self.assertFalse(cell_sets[1] & cell_sets[2])
 
-    def test_rwth_raw_files_fail_closed_until_validated(self):
+    def test_rwth_ird_parser_extracts_reference_capacity(self):
         with tempfile.TemporaryDirectory() as tmp:
-            Path(tmp, "cell-1.csv").write_text("cycle,capacity\n1,1.2\n", encoding="utf-8")
-            with self.assertRaisesRegex(RuntimeError, "字段映射尚未通过"):
-                RWTHCommercialAgingLoader.load(tmp)
+            path = Path(tmp, "S2000TEST_CU_at25degC_V00.ird")
+            rows = [
+                "Cellname: ' NA18650-1250\n", "Starttime: '2023-01-01 00:00:00'\n",
+                "###\n", "Time,Voltage,Current,Ah_counter,Temperature,StepID\n",
+                "0 days 00:00:00,3.8,-0.6,1.2,25,1\n",
+                "0 days 01:00:00,2.8,-0.6,0.6,25,1\n",
+                "0 days 02:00:00,1.5,-0.6,0.0,25,1\n",
+            ]
+            path.write_text("".join(rows), encoding="utf-8")
+            with path.open("rb") as source:
+                start_time, frame = RWTHCommercialAgingLoader._read_ird(source, path.name)
+            cycles = RWTHCommercialAgingLoader._cycles_from_measurement(
+                frame, "DOD100_1C1C_25degC", start_time, "cu", path.name
+            )
+
+        self.assertEqual(len(cycles), 1)
+        self.assertAlmostEqual(cycles[0].discharge_capacity_ah, 1.2)
+        self.assertTrue(cycles[0].metadata["is_reference_capacity"])
+        self.assertEqual(cycles[0].temperature_c, 25.0)
+
+    def test_rwth_condition_metadata(self):
+        meta = RWTHCommercialAgingLoader._condition_metadata("DOD80_2C2C_-10degC")
+        self.assertAlmostEqual(meta["dod"], 0.8)
+        self.assertAlmostEqual(meta["soc_min"], 0.2)
+        self.assertAlmostEqual(meta["c_rate_discharge"], 2.0)
+        self.assertAlmostEqual(meta["temperature_c"], -10.0)
 
 
 class TestSodiumAudit(unittest.TestCase):
