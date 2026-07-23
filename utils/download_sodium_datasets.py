@@ -11,6 +11,7 @@ import concurrent.futures
 import http.cookiejar
 import os
 import shutil
+import time
 import zipfile
 from pathlib import Path
 from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
@@ -64,30 +65,38 @@ def _rwth_size(url: str) -> int:
 
 
 def _download_rwth_part(
-    url: str, part_path: Path, start: int, end: int, expected_size: int
+    url: str, part_path: Path, start: int, end: int, expected_size: int,
+    max_attempts: int = 12,
 ) -> int:
     if part_path.exists() and part_path.stat().st_size == expected_size:
         return expected_size
 
     temp_path = part_path.with_suffix(part_path.suffix + ".tmp")
-    downloaded = temp_path.stat().st_size if temp_path.exists() else 0
-    if downloaded > expected_size:
-        temp_path.unlink()
-        downloaded = 0
-    request_start = start + downloaded
-    with urlopen(_rwth_request(url, request_start, end), timeout=60) as response:
-        if response.status != 206:
-            raise RuntimeError(f"RWTH 分片未返回 HTTP 206: {response.status}")
-        content_range = response.headers.get("Content-Range", "")
-        if not content_range.startswith(f"bytes {request_start}-{end}/"):
-            raise RuntimeError(f"RWTH 分片范围不匹配: {content_range}")
-        with temp_path.open("ab") as output:
-            while chunk := response.read(1024 * 1024):
-                output.write(chunk)
+    for attempt in range(1, max_attempts + 1):
+        downloaded = temp_path.stat().st_size if temp_path.exists() else 0
+        if downloaded > expected_size:
+            temp_path.unlink()
+            downloaded = 0
+        if downloaded == expected_size:
+            break
+        request_start = start + downloaded
+        try:
+            with urlopen(_rwth_request(url, request_start, end), timeout=60) as response:
+                if response.status != 206:
+                    raise RuntimeError(f"RWTH 分片未返回 HTTP 206: {response.status}")
+                content_range = response.headers.get("Content-Range", "")
+                if not content_range.startswith(f"bytes {request_start}-{end}/"):
+                    raise RuntimeError(f"RWTH 分片范围不匹配: {content_range}")
+                with temp_path.open("ab") as output:
+                    while chunk := response.read(1024 * 1024):
+                        output.write(chunk)
+        except (OSError, RuntimeError) as exc:
+            if attempt == max_attempts:
+                raise RuntimeError(f"RWTH 分片重试耗尽: {part_path.name}") from exc
+        if temp_path.stat().st_size < expected_size:
+            time.sleep(min(attempt * 2, 15))
     if temp_path.stat().st_size != expected_size:
-        raise RuntimeError(
-            f"RWTH 分片大小错误: {temp_path.stat().st_size} != {expected_size}"
-        )
+        raise RuntimeError(f"RWTH 分片大小错误: {temp_path.stat().st_size} != {expected_size}")
     os.replace(temp_path, part_path)
     return expected_size
 
