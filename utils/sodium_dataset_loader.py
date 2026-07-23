@@ -288,7 +288,9 @@ class RWTHCommercialAgingLoader:
             c_rate = discharge["mean_current_a"] / cls.NOMINAL_CAPACITY_AH
             is_reference = 0.35 <= c_rate <= 0.65
             is_aging_rate = abs(c_rate - meta["c_rate_discharge"]) <= max(0.15, 0.15 * meta["c_rate_discharge"])
-            if discharge["capacity_ah"] < 0.3:
+            # DOD20 的单次容量约为 0.24 Ah，不能使用固定 0.3 Ah 门槛。
+            expected_capacity = cls.NOMINAL_CAPACITY_AH * meta["dod"]
+            if discharge["capacity_ah"] < max(0.05, 0.5 * expected_capacity):
                 continue
             if file_kind == "cu" and not is_reference:
                 continue
