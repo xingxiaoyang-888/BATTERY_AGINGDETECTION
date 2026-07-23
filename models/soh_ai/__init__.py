@@ -70,33 +70,32 @@ from .data_pipeline import (
     create_synthetic_test_data,
 )
 
-# ── 模型架构 ──
-from .models import (
-    XGBoostWrapper,
-    BiLSTMAttention,
-    TemporalTransformer,
-    EnsembleModel,
-    AdditiveAttention,
-    PositionalEncoding,
-)
-
-# ── 训练器 ──
-from .trainer import (
-    BaseTrainer,
-    XGBoostTrainer,
-    LSTMTrainer,
-    TransformerTrainer,
-    EnsembleTrainer,
-    CrossValidator,
-    TrainingHistory,
-)
-
-# ── 评估 ──
-from .evaluate import (
-    RegressionMetrics,
-    Visualizer,
-    ModelEvaluator,
-)
+# ── 模型架构、训练器与评估器按需导入 ──
+# 数据审计和 XGBoost 预处理不应因服务器尚未安装 PyTorch 而无法启动。
+TORCH_AVAILABLE = False
+try:
+    from .models import (
+        XGBoostWrapper,
+        BiLSTMAttention,
+        TemporalTransformer,
+        EnsembleModel,
+        AdditiveAttention,
+        PositionalEncoding,
+    )
+    from .trainer import (
+        BaseTrainer,
+        XGBoostTrainer,
+        LSTMTrainer,
+        TransformerTrainer,
+        EnsembleTrainer,
+        CrossValidator,
+        TrainingHistory,
+    )
+    from .evaluate import RegressionMetrics, Visualizer, ModelEvaluator
+    TORCH_AVAILABLE = True
+except ModuleNotFoundError as exc:
+    if exc.name != 'torch':
+        raise
 
 __all__ = [
     # Config
@@ -110,6 +109,7 @@ __all__ = [
     'DataQualityConfig', 'DQ_CFG',
     'PROCESSED_DATA_DIR', 'WEIGHTS_DIR',
     'SODIUM_RAW_DATA_DIR',
+    'TORCH_AVAILABLE',
     # Data Pipeline
     'SOHDataPipeline',
     'CycleFeatureExtractor',
@@ -117,23 +117,13 @@ __all__ = [
     'SequenceBuilder',
     'DataSplitter',
     'create_synthetic_test_data',
-    # Models
-    'XGBoostWrapper',
-    'BiLSTMAttention',
-    'TemporalTransformer',
-    'EnsembleModel',
-    'AdditiveAttention',
-    'PositionalEncoding',
-    # Trainer
-    'BaseTrainer',
-    'XGBoostTrainer',
-    'LSTMTrainer',
-    'TransformerTrainer',
-    'EnsembleTrainer',
-    'CrossValidator',
-    'TrainingHistory',
-    # Evaluate
-    'RegressionMetrics',
-    'Visualizer',
-    'ModelEvaluator',
 ]
+
+if TORCH_AVAILABLE:
+    __all__ += [
+        'XGBoostWrapper', 'BiLSTMAttention', 'TemporalTransformer',
+        'EnsembleModel', 'AdditiveAttention', 'PositionalEncoding',
+        'BaseTrainer', 'XGBoostTrainer', 'LSTMTrainer',
+        'TransformerTrainer', 'EnsembleTrainer', 'CrossValidator',
+        'TrainingHistory', 'RegressionMetrics', 'Visualizer', 'ModelEvaluator',
+    ]
