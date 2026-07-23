@@ -9,6 +9,7 @@ import pandas as pd
 from models.soh_ai.data_pipeline import DataCleaner, DataSplitter, SOHDataPipeline
 from models.soh_ai.config import FEATURE_CFG
 from utils.audit_sodium_data import audit_feature_table
+from utils.evaluate_horizon_baselines import _metrics
 from utils.sodium_dataset_loader import (
     MendeleyNFMLoader,
     RWTHCommercialAgingLoader,
@@ -147,6 +148,14 @@ class TestSodiumIsolation(unittest.TestCase):
 
 
 class TestSodiumAudit(unittest.TestCase):
+    def test_horizon_metric_returns_physical_rmse(self):
+        report = _metrics(
+            pd.Series([1.0, 0.9]).to_numpy(),
+            pd.Series([0.99, 0.88]).to_numpy(),
+        )
+        self.assertAlmostEqual(report["rmse"], (0.00025 ** 0.5))
+        self.assertAlmostEqual(report["mae"], 0.015)
+
     def test_valid_sodium_feature_table_passes(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "feature_table.parquet"
