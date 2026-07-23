@@ -52,7 +52,10 @@ def _mean_voltage(row: pd.Series, voltage_columns: List[float]) -> float:
     voltages = voltages[unique_idx]
     if capacities.size < 2 or capacities[-1] <= capacities[0]:
         return 0.0
-    return float(np.trapezoid(voltages, capacities) / (capacities[-1] - capacities[0]))
+    integrate = getattr(np, "trapezoid", None)
+    if integrate is None:
+        integrate = np.trapz
+    return float(integrate(voltages, capacities) / (capacities[-1] - capacities[0]))
 
 
 class MendeleyNFMLoader:
