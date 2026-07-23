@@ -1243,13 +1243,16 @@ class CrossValidator:
             train_df = train_val_df[train_val_df['cell_id'].isin(train_cells)].copy()
             val_df = train_val_df[train_val_df['cell_id'].isin(val_cells)].copy()
 
+            # SOH 同时是输入状态和预测目标，必须保留真实物理域。
+            # 只缩放其余输入列，否则 KFold 的 y 会被错误地变换到缩放域。
+            scale_cols = [col for col in feature_cols if col != FEATURE_CFG.target_col]
             scaler = RobustScaler(quantile_range=(5, 95))
-            scaler.fit(train_df[feature_cols].values)
+            scaler.fit(train_df[scale_cols].values)
 
             def _scale(df):
                 out = df.copy()
                 if not out.empty:
-                    out.loc[:, feature_cols] = scaler.transform(out[feature_cols].values)
+                    out.loc[:, scale_cols] = scaler.transform(out[scale_cols].values)
                 return out
 
             X_train, y_train, _, _ = seq_builder.build_sequences(_scale(train_df), feature_cols=feature_cols)

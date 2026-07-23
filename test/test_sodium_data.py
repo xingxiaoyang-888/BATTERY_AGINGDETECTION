@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from models.soh_ai.data_pipeline import DataCleaner, DataSplitter, SOHDataPipeline
+from models.soh_ai.config import FEATURE_CFG
 from utils.audit_sodium_data import audit_feature_table
 from utils.sodium_dataset_loader import (
     MendeleyNFMLoader,
@@ -77,6 +78,13 @@ class TestMendeleyNFMLoader(unittest.TestCase):
 
 
 class TestSodiumIsolation(unittest.TestCase):
+    def test_kfold_scaling_contract_keeps_soh_in_physical_domain(self):
+        feature_cols = [FEATURE_CFG.target_col, "temperature_c", "c_rate_charge"]
+        scale_cols = [col for col in feature_cols if col != FEATURE_CFG.target_col]
+
+        self.assertNotIn(FEATURE_CFG.target_col, scale_cols)
+        self.assertEqual(scale_cols, ["temperature_c", "c_rate_charge"])
+
     def test_soh_reference_does_not_use_future_capacity(self):
         capacities = [1.0] * 10 + [2.0]
         cell = CellDegradationData(
