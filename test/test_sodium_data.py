@@ -169,6 +169,25 @@ class TestSodiumIsolation(unittest.TestCase):
         self.assertAlmostEqual(meta["c_rate_discharge"], 2.0)
         self.assertAlmostEqual(meta["temperature_c"], -10.0)
 
+    def test_rwth_rt_file_can_omit_temperature_channel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "S2000TEST.ird")
+            path.write_text(
+                "Starttime: '2023-01-01 00:00:00'\n###\n"
+                "Time,Voltage,Current,Ah_counter,StepID\n"
+                "0 days 00:00:00,3.8,-1.2,1.2,1\n"
+                "0 days 01:00:00,1.5,-1.2,0.0,1\n",
+                encoding="utf-8",
+            )
+            with path.open("rb") as source:
+                start_time, frame = RWTHCommercialAgingLoader._read_ird(source, path.name)
+            cycles = RWTHCommercialAgingLoader._cycles_from_measurement(
+                frame, "DOD100_1C1C_RT", start_time, "cycling", path.name
+            )
+
+        self.assertEqual(len(cycles), 1)
+        self.assertEqual(cycles[0].temperature_c, 25.0)
+
 
 class TestSodiumAudit(unittest.TestCase):
     def test_horizon_metric_returns_physical_rmse(self):

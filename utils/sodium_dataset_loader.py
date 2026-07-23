@@ -232,19 +232,22 @@ class RWTHCommercialAgingLoader:
         if start_time is None:
             raise ValueError(f"RWTH 文件缺少 Starttime: {source_name}")
         frame = pd.read_csv(text)
-        expected = {"Time", "Voltage", "Current", "Ah_counter", "Temperature", "StepID"}
+        expected = {"Time", "Voltage", "Current", "Ah_counter", "StepID"}
         if frame.empty:
             return start_time, frame
-        if set(frame.columns) != expected:
+        if not expected.issubset(frame.columns):
             raise ValueError(f"RWTH 通道不匹配 {source_name}: {list(frame.columns)}")
-        for column in expected - {"Time"}:
+        numeric_columns = (expected - {"Time"}) | ({"Temperature"} & set(frame.columns))
+        for column in numeric_columns:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
         frame["Time"] = pd.to_timedelta(frame["Time"], errors="coerce")
         frame = frame.dropna(subset=["Time", "Voltage", "Current", "Ah_counter"])
         return start_time, frame
 
     @classmethod
-    def _capacity_segments(cls, frame: pd.DataFrame) -> List[Dict[str, float]]:
+    def _capacity_segments(
+        cls, frame: pd.DataFrame, fallback_temperature_c: float
+    ) -> List[Dict[str, float]]:
         """提取连续恒流段；电流负值为放电，正值为充电。"""
         if frame.empty:
             return []
@@ -269,7 +272,11 @@ class RWTHCommercialAgingLoader:
                 "capacity_ah": capacity,
                 "mean_voltage_v": mean_voltage,
                 "mean_current_a": abs(float(current)),
-                "temperature_c": float(step["Temperature"].median()),
+                "temperature_c": (
+                    float(step["Temperature"].median())
+                    if "Temperature" in step.columns
+                    else fallback_temperature_c
+                ),
                 "duration_h": duration_h,
             })
         return segments
@@ -280,7 +287,7 @@ class RWTHCommercialAgingLoader:
         file_kind: str, source_name: str,
     ) -> List[CycleData]:
         meta = cls._condition_metadata(condition)
-        segments = cls._capacity_segments(frame)
+        segments = cls._capacity_segments(frame, meta["temperature_c"])
         discharges = [item for item in segments if item["direction"] == "discharge"]
         charges = [item for item in segments if item["direction"] == "charge"]
         cycles = []
