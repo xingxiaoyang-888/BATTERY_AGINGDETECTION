@@ -764,6 +764,7 @@ class EnsembleTrainer:
             'history': history,
             'scalers': pipeline_output.get('scalers', {}),
             'test_results': test_results,
+            'ensemble_weights': dict(self.ensemble.weights),
             'available_models': self.ensemble.available_models,
         }
 
@@ -859,6 +860,11 @@ class EnsembleTrainer:
                 indent=2, ensure_ascii=False, default=_json_default,
             )
         logger.info(f"  训练历史已保存: {history_path}")
+
+        weights_path = output_dir / 'ensemble_weights.json'
+        with open(weights_path, 'w') as f:
+            json.dump(self.ensemble.weights, f, indent=2, ensure_ascii=False)
+        logger.info(f"  集成权重已保存: {weights_path}")
 
         # 保存测试结果
         if self.results.get('test_results'):

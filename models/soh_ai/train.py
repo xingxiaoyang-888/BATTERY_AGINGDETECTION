@@ -373,6 +373,7 @@ def run_training(args: argparse.Namespace) -> int:
         'arguments': vars(args),
         'models_trained': results['available_models'],
         'test_results': results.get('test_results', {}),
+        'ensemble_weights': results.get('ensemble_weights', {}),
     }
     config_path = Path(output_dir) / 'run_config.json'
     with open(config_path, 'w') as f:

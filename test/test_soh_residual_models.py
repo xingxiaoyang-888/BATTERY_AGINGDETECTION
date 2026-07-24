@@ -1,6 +1,9 @@
 """SOH 残差学习与持久性锚点测试。"""
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -56,6 +59,20 @@ class TestResidualSOHModels(unittest.TestCase):
 
         self.assertIn("persistence", metrics)
         self.assertAlmostEqual(metrics["persistence"]["RMSE"], 0.01, places=6)
+
+    def test_ensemble_weights_are_persisted(self):
+        trainer = EnsembleTrainer()
+        trainer.ensemble.set_weights(xgb=0.2, lstm=0.8, transformer=0.0)
+        trainer.results = {"history": {}, "test_results": {}}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            trainer.save_all(tmp)
+            weights = json.loads(
+                (Path(tmp) / "ensemble_weights.json").read_text(encoding="utf-8")
+            )
+
+        self.assertAlmostEqual(weights["xgb"], 0.2)
+        self.assertAlmostEqual(weights["lstm"], 0.8)
 
 
 if __name__ == "__main__":

@@ -1035,6 +1035,16 @@ class ModelEvaluator:
             m.eval()
             ensemble.register('transformer', m)
 
+        ensemble_weights_path = weights_dir / 'ensemble_weights.json'
+        if ensemble_weights_path.exists():
+            with open(ensemble_weights_path, 'r', encoding='utf-8') as fh:
+                weights = json.load(fh)
+            ensemble.set_weights(
+                xgb=weights.get('xgb', 0.0),
+                lstm=weights.get('lstm', 0.0),
+                transformer=weights.get('transformer', 0.0),
+            )
+
         if test_data is not None:
             X_test, y_test = test_data
             return evaluator.evaluate_all(ensemble, X_test, y_test)
