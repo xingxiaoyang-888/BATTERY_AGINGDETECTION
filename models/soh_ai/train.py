@@ -147,8 +147,24 @@ def run_training(args: argparse.Namespace) -> int:
     logger.info("=" * 70)
 
     is_transfer = getattr(args, 'transfer', False)
+    processed = None
 
-    if args.synthetic:
+    if args.processed_dir:
+        if args.synthetic or is_transfer:
+            logger.error("--processed-dir 不能与 --synthetic 或 --transfer 同时使用")
+            return 2
+        from models.soh_ai.data_pipeline import SOHDataPipeline
+        logger.info(f"  直接读取已处理训练输入: {args.processed_dir}")
+        try:
+            processed = SOHDataPipeline().load_processed(
+                processed_dir=args.processed_dir,
+                scaler_path=args.scaler_path,
+            )
+        except Exception as e:
+            logger.error(f"  已处理训练输入加载失败: {e}", exc_info=args.verbose)
+            return 3
+        cells = []
+    elif args.synthetic:
         logger.info("  使用合成数据模式 (--synthetic)")
         from models.soh_ai.data_pipeline import (
             SOHDataPipeline, create_synthetic_test_data
@@ -199,24 +215,28 @@ def run_training(args: argparse.Namespace) -> int:
                 logger.error("  未加载到钠电数据，请先准备 Wenzhou H 系列或 Mendeley NFM。")
                 return 2
 
-    logger.info(f"  总计 {len(cells)} 个电芯用于训练")
+    if processed is None:
+        logger.info(f"  总计 {len(cells)} 个电芯用于训练")
 
     # ── 3. 数据管线 ──
     logger.info("\n" + "=" * 70)
     logger.info("  阶段 B: 数据管线处理")
     logger.info("=" * 70)
 
-    from models.soh_ai.data_pipeline import SOHDataPipeline
-    pipeline = SOHDataPipeline()
-    try:
-        processed = pipeline.run(
-            cells, save=True,
-            chemistry_aware=is_transfer,
-            target_chemistry="sodium-ion",
-        )
-    except Exception as e:
-        logger.error(f"  数据管线失败: {e}", exc_info=args.verbose)
-        return 3
+    if processed is None:
+        from models.soh_ai.data_pipeline import SOHDataPipeline
+        pipeline = SOHDataPipeline()
+        try:
+            processed = pipeline.run(
+                cells, save=True,
+                chemistry_aware=is_transfer,
+                target_chemistry="sodium-ion",
+            )
+        except Exception as e:
+            logger.error(f"  数据管线失败: {e}", exc_info=args.verbose)
+            return 3
+    else:
+        logger.info("  已处理输入通过恢复校验，跳过原始数据解析与特征重算")
 
     # 打印数据摘要
     logger.info(f"  特征表: {processed['feature_df'].shape}")
@@ -409,6 +429,10 @@ def build_parser() -> argparse.ArgumentParser:
                      choices=['wenzhou', 'mendeley-nfm', 'rwth'],
                      default=['wenzhou', 'mendeley-nfm'],
                      help='纯钠电模式使用的数据源（RWTH 完成字段核验后再启用）')
+    data.add_argument('--processed-dir', type=str, default=None,
+                     help='直接读取已审计的 feature_table/train/val/test Parquet 目录')
+    data.add_argument('--scaler-path', type=str, default=None,
+                     help='与已处理数据配套的 soh_scalers.pkl 路径')
     data.add_argument('--syn-cells', type=int, default=8,
                      help='合成电芯数量 (默认: 8)')
     data.add_argument('--syn-cycles', type=int, default=500,

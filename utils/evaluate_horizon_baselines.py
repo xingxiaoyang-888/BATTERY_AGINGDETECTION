@@ -137,33 +137,132 @@ def evaluate_horizons(
     return results
 
 
+def evaluate_fixed_split_horizons(
+    splits: dict,
+    horizons: Iterable[int],
+    lookback: int = 32,
+) -> dict:
+    """在冻结的电芯级 train/val/test 划分上评估多跨度基线。"""
+    train, val, test = (splits[name].copy() for name in ("train", "val", "test"))
+    feature_cols = _feature_columns(train)
+    scale_cols = [col for col in feature_cols if col != FEATURE_CFG.target_col]
+    scaler = RobustScaler(quantile_range=(5, 95))
+    scaler.fit(train[scale_cols].values)
+
+    def scale(frame: pd.DataFrame) -> pd.DataFrame:
+        output = frame.copy()
+        output.loc[:, scale_cols] = scaler.transform(output[scale_cols].values)
+        return output
+
+    scaled = {name: scale(frame) for name, frame in splits.items()}
+    soh_index = feature_cols.index(FEATURE_CFG.target_col)
+    builder = SequenceBuilder()
+    results = {
+        "lookback": lookback,
+        "feature_columns": feature_cols,
+        "split_cells": {
+            name: sorted(frame["cell_id"].astype(str).unique().tolist())
+            for name, frame in splits.items()
+        },
+        "horizons": {},
+    }
+
+    for horizon in horizons:
+        sequences = {}
+        for name, frame in scaled.items():
+            sequences[name] = builder.build_sequences(
+                frame, lookback=lookback, horizon=horizon,
+                feature_cols=feature_cols,
+            )
+        X_train, y_train = sequences["train"][:2]
+        X_val, y_val = sequences["val"][:2]
+        X_test, y_test, test_cells = sequences["test"][:3]
+        if not len(X_train) or not len(X_val) or not len(X_test):
+            raise ValueError(f"horizon={horizon} 时存在空序列划分")
+
+        xgb = XGBoostWrapper()
+        xgb.fit(
+            EnsembleTrainer._extract_tabular_features(X_train), y_train[:, -1:],
+            EnsembleTrainer._extract_tabular_features(X_val), y_val[:, -1:],
+        )
+        y_true = y_test[:, -1]
+        xgb_pred = xgb.predict(
+            EnsembleTrainer._extract_tabular_features(X_test)
+        ).ravel()
+        persistence_pred = X_test[:, -1, soh_index]
+        xgb_metrics = _metrics(y_true, xgb_pred)
+        persistence_metrics = _metrics(y_true, persistence_pred)
+
+        per_cell = {}
+        for cell_id in np.unique(test_cells):
+            mask = test_cells == cell_id
+            per_cell[str(cell_id)] = {
+                "samples": int(mask.sum()),
+                "xgb": _metrics(y_true[mask], xgb_pred[mask]),
+                "persistence": _metrics(y_true[mask], persistence_pred[mask]),
+            }
+
+        results["horizons"][str(horizon)] = {
+            "samples": int(len(y_true)),
+            "xgb": xgb_metrics,
+            "persistence": persistence_metrics,
+            "rmse_improvement_ratio": float(
+                1.0 - xgb_metrics["rmse"] / persistence_metrics["rmse"]
+            ),
+            "beats_persistence": bool(xgb_metrics["rmse"] < persistence_metrics["rmse"]),
+            "per_cell": per_cell,
+        }
+    return results
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="钠电多跨度预测与持久性基线评估")
     parser.add_argument("--datasets", nargs="+", choices=["wenzhou", "mendeley-nfm"],
                         default=["wenzhou", "mendeley-nfm"])
+    parser.add_argument("--processed-dir",
+                        help="直接使用已审计的 train/val/test Parquet 目录")
     parser.add_argument("--horizons", nargs="+", type=int, default=[16, 32, 64, 128])
     parser.add_argument("--lookback", type=int, default=32)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
-    cells = SodiumDatasetLoader().load_all(include=args.datasets)
-    extractor = CycleFeatureExtractor()
-    raw_features = pd.concat([extractor.extract(cell) for cell in cells], ignore_index=True)
-    clean_df = DataCleaner().clean(raw_features)
-    result = evaluate_horizons(clean_df, args.horizons, lookback=args.lookback)
-    result["datasets"] = args.datasets
+    if args.processed_dir:
+        processed_dir = Path(args.processed_dir)
+        splits = {
+            name: pd.read_parquet(processed_dir / f"{name}.parquet")
+            for name in ("train", "val", "test")
+        }
+        result = evaluate_fixed_split_horizons(
+            splits, args.horizons, lookback=args.lookback
+        )
+        result["processed_dir"] = str(processed_dir.resolve())
+    else:
+        cells = SodiumDatasetLoader().load_all(include=args.datasets)
+        extractor = CycleFeatureExtractor()
+        raw_features = pd.concat([extractor.extract(cell) for cell in cells], ignore_index=True)
+        clean_df = DataCleaner().clean(raw_features)
+        result = evaluate_horizons(clean_df, args.horizons, lookback=args.lookback)
+        result["datasets"] = args.datasets
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     for horizon, item in result["horizons"].items():
-        summary = item["summary"]
-        print(
-            f"horizon={horizon}: XGB RMSE={summary['xgb_rmse_mean']:.6f}, "
-            f"persistence RMSE={summary['persistence_rmse_mean']:.6f}, "
-            f"improvement={summary['mean_rmse_improvement_ratio']:.2%}, "
-            f"wins={summary['folds_beating_persistence']}/{summary['total_folds']}"
-        )
+        if "summary" in item:
+            summary = item["summary"]
+            print(
+                f"horizon={horizon}: XGB RMSE={summary['xgb_rmse_mean']:.6f}, "
+                f"persistence RMSE={summary['persistence_rmse_mean']:.6f}, "
+                f"improvement={summary['mean_rmse_improvement_ratio']:.2%}, "
+                f"wins={summary['folds_beating_persistence']}/{summary['total_folds']}"
+            )
+        else:
+            print(
+                f"horizon={horizon}: XGB RMSE={item['xgb']['rmse']:.6f}, "
+                f"persistence RMSE={item['persistence']['rmse']:.6f}, "
+                f"improvement={item['rmse_improvement_ratio']:.2%}, "
+                f"samples={item['samples']}"
+            )
     print(f"结果已保存: {output}")
     return 0
 

@@ -971,6 +971,116 @@ class SOHDataPipeline:
             logger.info(f"  跨域迁移学习: 源域={splits.get('source_chemistry')} → 目标域={target_chemistry}")
         return result
 
+    def load_processed(self,
+                       processed_dir: Union[str, Path] = PROCESSED_DATA_DIR,
+                       scaler_path: Optional[Union[str, Path]] = None,
+                       lookback: Optional[int] = None,
+                       horizon: Optional[int] = None) -> Dict[str, any]:
+        """从已审计的 Parquet 产物恢复模型训练输入，避免重复解析原始数据。"""
+        processed_dir = Path(processed_dir)
+        scaler_path = Path(scaler_path or (Path(WEIGHTS_DIR) / 'soh_scalers.pkl'))
+
+        required = [
+            processed_dir / 'feature_table.parquet',
+            processed_dir / 'feature_columns.json',
+            *(processed_dir / f'{name}.parquet' for name in ('train', 'val', 'test')),
+            scaler_path,
+        ]
+        missing = [str(path) for path in required if not path.is_file()]
+        if missing:
+            raise FileNotFoundError(f"已处理训练输入不完整，缺少: {missing}")
+
+        feature_df = pd.read_parquet(processed_dir / 'feature_table.parquet')
+        splits = {
+            name: pd.read_parquet(processed_dir / f'{name}.parquet')
+            for name in ('train', 'val', 'test')
+        }
+        with (processed_dir / 'feature_columns.json').open(encoding='utf-8') as source:
+            feature_cols = json.load(source)
+
+        if not isinstance(feature_cols, list) or not feature_cols:
+            raise ValueError("feature_columns.json 必须包含非空特征列列表")
+        missing_columns = sorted({
+            column for column in feature_cols
+            if any(column not in frame.columns for frame in splits.values())
+        })
+        if missing_columns:
+            raise ValueError(f"已处理划分缺少特征列: {missing_columns}")
+        if FEATURE_CFG.target_col not in feature_cols:
+            raise ValueError(f"特征列必须包含当前 SOH 输入列 '{FEATURE_CFG.target_col}'")
+
+        cell_sets = {
+            name: set(frame['cell_id'].astype(str).unique())
+            for name, frame in splits.items()
+        }
+        overlaps = (
+            (cell_sets['train'] & cell_sets['val'])
+            | (cell_sets['train'] & cell_sets['test'])
+            | (cell_sets['val'] & cell_sets['test'])
+        )
+        if overlaps:
+            raise ValueError(f"训练/验证/测试划分存在电芯重叠: {sorted(overlaps)}")
+
+        for name, frame in splits.items():
+            values = frame[feature_cols].to_numpy(dtype=float)
+            if not np.isfinite(values).all():
+                raise ValueError(f"{name} 划分包含 NaN 或无穷值")
+
+        scalers = joblib.load(scaler_path)
+        if not isinstance(scalers, dict) or scalers.get('X') is None:
+            raise ValueError(f"标准化器格式无效: {scaler_path}")
+        scale_cols = [column for column in feature_cols if column != FEATURE_CFG.target_col]
+        x_scaler = scalers['X']
+        expected_features = getattr(x_scaler, 'n_features_in_', len(scale_cols))
+        if expected_features != len(scale_cols):
+            raise ValueError(
+                f"标准化器需要 {expected_features} 个特征，当前处理数据为 {len(scale_cols)} 个"
+            )
+
+        scaled_splits = {}
+        sequences = {}
+        for name, frame in splits.items():
+            scaled = frame.copy()
+            scaled.loc[:, scale_cols] = x_scaler.transform(frame[scale_cols].values)
+            scaled_splits[name] = scaled
+            X, y, _, _ = self.seq_builder.build_sequences(
+                scaled,
+                lookback=lookback,
+                horizon=horizon,
+                feature_cols=feature_cols,
+            )
+            if len(X) == 0:
+                raise ValueError(f"{name} 划分无法构建序列，请检查 lookback/horizon")
+            sequences[name] = (X, y)
+
+        quality_report = {}
+        quality_path = processed_dir / 'quality_report.json'
+        if quality_path.is_file():
+            with quality_path.open(encoding='utf-8') as source:
+                quality_report = json.load(source)
+
+        self.scalers = scalers
+        self.quality_report = quality_report
+        logger.info(
+            "已恢复处理数据: %d 行, train/val/test 电芯=%d/%d/%d",
+            len(feature_df),
+            len(cell_sets['train']), len(cell_sets['val']), len(cell_sets['test']),
+        )
+        return {
+            'feature_df': feature_df,
+            'splits': splits,
+            'scaled_splits': scaled_splits,
+            'sequences': sequences,
+            'scalers': scalers,
+            'quality_report': quality_report,
+            'feature_cols': feature_cols,
+            'is_cross_chemistry': False,
+            'source_chemistry': None,
+            'target_chemistry': 'sodium-ion',
+            'source_cells': [],
+            'target_cells': sorted(set().union(*cell_sets.values())),
+        }
+
     def _fit_scale(self, splits: Dict[str, pd.DataFrame],
                    full_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         """

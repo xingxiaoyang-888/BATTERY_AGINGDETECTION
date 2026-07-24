@@ -2,9 +2,13 @@
 
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
+import joblib
+import numpy as np
 import pandas as pd
+from sklearn.preprocessing import RobustScaler
 
 from models.soh_ai.data_pipeline import DataCleaner, DataSplitter, SOHDataPipeline
 from models.soh_ai.config import FEATURE_CFG
@@ -79,6 +83,47 @@ class TestMendeleyNFMLoader(unittest.TestCase):
 
 
 class TestSodiumIsolation(unittest.TestCase):
+    def test_processed_training_input_can_be_restored(self):
+        feature_cols = ["soh", "temperature_c", "c_rate_charge"]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frames = {}
+            for split_index, name in enumerate(("train", "val", "test")):
+                rows = []
+                for cycle_index in range(40):
+                    rows.append({
+                        "cell_id": f"{name}-cell",
+                        "chemistry": "sodium-ion",
+                        "dataset_id": "fixture",
+                        "condition": "fixture",
+                        "cycle_index": cycle_index + 1,
+                        "soh": 1.0 - 0.001 * cycle_index,
+                        "temperature_c": 20.0 + split_index,
+                        "c_rate_charge": 1.0,
+                    })
+                frames[name] = pd.DataFrame(rows)
+                frames[name].to_parquet(root / f"{name}.parquet", index=False)
+
+            pd.concat(frames.values(), ignore_index=True).to_parquet(
+                root / "feature_table.parquet", index=False
+            )
+            (root / "feature_columns.json").write_text(
+                json.dumps(feature_cols), encoding="utf-8"
+            )
+            scaler = RobustScaler(quantile_range=(5, 95)).fit(
+                frames["train"][["temperature_c", "c_rate_charge"]].values
+            )
+            scaler_path = root / "soh_scalers.pkl"
+            joblib.dump({"X": scaler, "y": None}, scaler_path)
+
+            restored = SOHDataPipeline().load_processed(
+                root, scaler_path=scaler_path, lookback=32, horizon=1
+            )
+
+        self.assertEqual(restored["feature_cols"], feature_cols)
+        self.assertEqual(restored["sequences"]["train"][0].shape, (8, 32, 3))
+        self.assertTrue(np.isfinite(restored["sequences"]["test"][0]).all())
+
     def test_kfold_scaling_contract_keeps_soh_in_physical_domain(self):
         feature_cols = [FEATURE_CFG.target_col, "temperature_c", "c_rate_charge"]
         scale_cols = [col for col in feature_cols if col != FEATURE_CFG.target_col]
