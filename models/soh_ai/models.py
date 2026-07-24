@@ -25,6 +25,7 @@ import torch.nn.functional as F
 
 from .config import (
     FEATURE_CFG,
+    ACTUAL_FEATURE_COLUMNS,
     XGB_CFG,
     LSTM_CFG,
     TRANSFORMER_CFG,
@@ -32,6 +33,11 @@ from .config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _default_soh_feature_index() -> int:
+    """返回标准特征顺序中 SOH 的位置。"""
+    return ACTUAL_FEATURE_COLUMNS.index(FEATURE_CFG.target_col)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -102,8 +108,14 @@ class XGBoostWrapper:
       - 训练极快，可作为快速基线
     """
 
-    def __init__(self, cfg=None):
+    def __init__(self, cfg=None, residual_learning: bool = True,
+                 soh_feature_index: Optional[int] = None):
         self.cfg = cfg or XGB_CFG
+        self.residual_learning = residual_learning
+        self.soh_feature_index = (
+            _default_soh_feature_index()
+            if soh_feature_index is None else soh_feature_index
+        )
         self._model = None
         self._is_fitted = False
         self._multi_output = False  # 始终为 False（仅保留向后兼容）
@@ -116,7 +128,7 @@ class XGBoostWrapper:
             raise ImportError(
                 "XGBoost 未安装。请运行: pip install xgboost"
             )
-        self._model = xgb.XGBRegressor(
+        params = dict(
             n_estimators=self.cfg.n_estimators,
             max_depth=self.cfg.max_depth,
             learning_rate=self.cfg.learning_rate,
@@ -132,6 +144,9 @@ class XGBoostWrapper:
             n_jobs=-1,
             verbosity=0,
         )
+        if self.residual_learning:
+            params['base_score'] = 0.0
+        self._model = xgb.XGBRegressor(**params)
 
     def fit(self, X: np.ndarray, y: np.ndarray,
             X_val: Optional[np.ndarray] = None,
@@ -162,16 +177,29 @@ class XGBoostWrapper:
                 f"多步推演请在推理时使用自回归滚动策略。"
             )
 
+        if self.soh_feature_index >= X.shape[1]:
+            raise ValueError(
+                f"SOH 特征索引 {self.soh_feature_index} 超出 X.shape={X.shape}"
+            )
+        train_target = (
+            y_flat - X[:, self.soh_feature_index]
+            if self.residual_learning else y_flat
+        )
+
         y_val_flat = None
         eval_set = None
         if X_val is not None and y_val is not None:
             y_val_flat = y_val.ravel() if y_val.ndim > 1 else y_val
-            eval_set = [(X_val, y_val_flat)]
+            val_target = (
+                y_val_flat - X_val[:, self.soh_feature_index]
+                if self.residual_learning else y_val_flat
+            )
+            eval_set = [(X_val, val_target)]
         else:
             # 无验证集时禁用 early stopping，否则 XGBoost 会报错
             self._model.set_params(early_stopping_rounds=None)
 
-        self._model.fit(X, y_flat, eval_set=eval_set, verbose=False)
+        self._model.fit(X, train_target, eval_set=eval_set, verbose=False)
         self._is_fitted = True
 
         return self
@@ -180,7 +208,10 @@ class XGBoostWrapper:
         """预测 SOH 值，返回 (n_samples, 1)"""
         if not self._is_fitted:
             raise RuntimeError("模型尚未训练，请先调用 fit()")
-        return self._model.predict(X).reshape(-1, 1)
+        prediction = self._model.predict(X)
+        if self.residual_learning:
+            prediction = prediction + X[:, self.soh_feature_index]
+        return prediction.reshape(-1, 1)
 
     def save(self, filepath: str):
         """保存模型到磁盘"""
@@ -188,6 +219,8 @@ class XGBoostWrapper:
         state = {
             'model': self._model,
             'config': self.cfg,
+            'residual_learning': self.residual_learning,
+            'soh_feature_index': self.soh_feature_index,
         }
         joblib.dump(state, filepath)
         logger.info(f"  XGBoost 模型已保存至: {filepath}")
@@ -197,7 +230,11 @@ class XGBoostWrapper:
         """从磁盘加载模型"""
         import joblib
         state = joblib.load(filepath)
-        wrapper = cls(cfg=state.get('config', cfg))
+        wrapper = cls(
+            cfg=state.get('config', cfg),
+            residual_learning=state.get('residual_learning', False),
+            soh_feature_index=state.get('soh_feature_index'),
+        )
         # 兼容旧格式（multi_output 残留）
         if 'models' in state and 'multi_output' in state:
             wrapper._model = state['models'] if not state['multi_output'] else state['models']  # fallback
@@ -271,12 +308,21 @@ class BiLSTMAttention(nn.Module):
     配置来源: LSTMAttentionConfig (config.py)
     """
 
-    def __init__(self, cfg=None, input_dim: int = None):
+    def __init__(self, cfg=None, input_dim: int = None,
+                 soh_feature_index: Optional[int] = None):
         super().__init__()
         self.cfg = cfg or LSTM_CFG
 
         # 允许动态覆盖 input_dim（适配数据管线实际特征数）
         _input_dim = input_dim or self.cfg.input_dim
+        self.soh_feature_index = (
+            _default_soh_feature_index()
+            if soh_feature_index is None else soh_feature_index
+        )
+        if not 0 <= self.soh_feature_index < _input_dim:
+            raise ValueError(
+                f"SOH 特征索引 {self.soh_feature_index} 超出 input_dim={_input_dim}"
+            )
         hidden_dim = self.cfg.hidden_dim
         num_layers = self.cfg.num_layers
         dropout = self.cfg.dropout
@@ -311,6 +357,8 @@ class BiLSTMAttention(nn.Module):
         )
 
         self.apply(lambda m: _init_weights(m, method="xavier"))
+        nn.init.zeros_(self.fc[-1].weight)
+        nn.init.zeros_(self.fc[-1].bias)
 
     def forward(self, x: torch.Tensor,
                 mask: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -325,8 +373,9 @@ class BiLSTMAttention(nn.Module):
         lstm_out, (h_n, c_n) = self.lstm(x)  # lstm_out: (B, L, D)
         context, attn_w = self.attention(lstm_out, mask)
         out = self.dropout(context)
-        out = self.fc(out)
-        return out
+        residual = self.fc(out)
+        current_soh = x[:, -1, self.soh_feature_index].unsqueeze(-1)
+        return current_soh + residual
 
     @torch.no_grad()
     def rollout(self, x: torch.Tensor, steps: int, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -341,7 +390,7 @@ class BiLSTMAttention(nn.Module):
             preds.append(next_pred)
 
             next_step = cur[:, -1:, :].clone()
-            next_step[:, :, 0] = next_pred
+            next_step[:, :, self.soh_feature_index] = next_pred
             cur = torch.cat([cur[:, 1:, :], next_step], dim=1)
 
             if cur_mask is not None:
@@ -370,12 +419,21 @@ class TemporalTransformer(nn.Module):
     配置来源: TransformerConfig (config.py)
     """
 
-    def __init__(self, cfg=None, input_dim: int = None):
+    def __init__(self, cfg=None, input_dim: int = None,
+                 soh_feature_index: Optional[int] = None):
         super().__init__()
         self.cfg = cfg or TRANSFORMER_CFG
 
         # 允许动态覆盖 input_dim（适配数据管线实际特征数）
         _input_dim = input_dim or self.cfg.input_dim
+        self.soh_feature_index = (
+            _default_soh_feature_index()
+            if soh_feature_index is None else soh_feature_index
+        )
+        if not 0 <= self.soh_feature_index < _input_dim:
+            raise ValueError(
+                f"SOH 特征索引 {self.soh_feature_index} 超出 input_dim={_input_dim}"
+            )
         d_model = self.cfg.d_model
         nhead = self.cfg.nhead
         num_layers = self.cfg.num_encoder_layers
@@ -413,6 +471,8 @@ class TemporalTransformer(nn.Module):
         )
 
         self.apply(lambda m: _init_weights(m, method="kaiming"))
+        nn.init.zeros_(self.pred_head[-1].weight)
+        nn.init.zeros_(self.pred_head[-1].bias)
 
     def forward(self, x: torch.Tensor,
                 mask: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -425,6 +485,8 @@ class TemporalTransformer(nn.Module):
         Returns:
             y: (batch, horizon)
         """
+        current_soh = x[:, -1, self.soh_feature_index].unsqueeze(-1)
+
         # 投影 + 位置编码
         x = self.input_proj(x)  # (B, L, d_model)
         x = self.pos_encoder(x)
@@ -449,8 +511,8 @@ class TemporalTransformer(nn.Module):
             pooled = encoded.mean(dim=1)
 
         # 预测头
-        out = self.pred_head(pooled)  # (B, horizon)
-        return out
+        residual = self.pred_head(pooled)  # (B, horizon)
+        return current_soh + residual
 
 
     @torch.no_grad()
@@ -461,9 +523,11 @@ class TemporalTransformer(nn.Module):
         cur_mask = mask
         for _ in range(steps):
             y = self.forward(cur, cur_mask)
-            preds.append(y[:, -1:] if y.ndim == 2 else y.unsqueeze(-1))
-            last = cur[:, -1:, :].detach()
-            cur = torch.cat([cur[:, 1:, :], last], dim=1)
+            next_pred = y[:, -1:] if y.ndim == 2 else y.unsqueeze(-1)
+            preds.append(next_pred)
+            next_step = cur[:, -1:, :].clone()
+            next_step[:, :, self.soh_feature_index] = next_pred
+            cur = torch.cat([cur[:, 1:, :], next_step], dim=1)
             if cur_mask is not None:
                 cur_mask = torch.cat([cur_mask[:, 1:], torch.ones_like(cur_mask[:, :1])], dim=1)
         return torch.cat(preds, dim=1)

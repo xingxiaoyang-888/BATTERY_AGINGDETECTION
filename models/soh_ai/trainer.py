@@ -37,7 +37,7 @@ from sklearn.model_selection import GroupKFold
 from sklearn.preprocessing import RobustScaler
 
 from .config import (
-    FEATURE_CFG,
+    FEATURE_CFG, ACTUAL_FEATURE_COLUMNS,
     XGB_CFG, LSTM_CFG, TRANSFORMER_CFG,
     ENSEMBLE_CFG, TRAIN_CFG,
     WEIGHTS_DIR,
@@ -442,9 +442,15 @@ class XGBoostTrainer:
     注意：XGBoost 以 2D 扁平特征为输入，与序列模型不同。
     """
 
-    def __init__(self, cfg=None):
+    def __init__(self, cfg=None, soh_feature_index: int = None):
         self.cfg = cfg or XGB_CFG
-        self.model = XGBoostWrapper(self.cfg)
+        self.model = XGBoostWrapper(
+            self.cfg,
+            soh_feature_index=(
+                ACTUAL_FEATURE_COLUMNS.index(FEATURE_CFG.target_col)
+                if soh_feature_index is None else soh_feature_index
+            ),
+        )
         self.history = {'train_loss': [], 'val_loss': []}
 
     def fit(self,
@@ -503,13 +509,19 @@ class XGBoostTrainer:
 class LSTMTrainer(BaseTrainer):
     """BiLSTM + Attention 模型训练器"""
 
-    def __init__(self, cfg=None, train_cfg=None, input_dim: int = None):
+    def __init__(self, cfg=None, train_cfg=None, input_dim: int = None,
+                 soh_feature_index: int = None):
         self.cfg = cfg or LSTM_CFG
         self._input_dim = input_dim  # 允许从数据覆盖
+        self._soh_feature_index = soh_feature_index
         super().__init__(train_cfg)
 
     def _create_model(self) -> nn.Module:
-        return BiLSTMAttention(self.cfg, input_dim=self._input_dim)
+        return BiLSTMAttention(
+            self.cfg,
+            input_dim=self._input_dim,
+            soh_feature_index=self._soh_feature_index,
+        )
 
     def _create_optimizer(self, model: nn.Module) -> torch.optim.Optimizer:
         return optim.AdamW(
@@ -534,13 +546,19 @@ class LSTMTrainer(BaseTrainer):
 class TransformerTrainer(BaseTrainer):
     """Temporal Transformer 模型训练器"""
 
-    def __init__(self, cfg=None, train_cfg=None, input_dim: int = None):
+    def __init__(self, cfg=None, train_cfg=None, input_dim: int = None,
+                 soh_feature_index: int = None):
         self.cfg = cfg or TRANSFORMER_CFG
         self._input_dim = input_dim  # 允许从数据覆盖
+        self._soh_feature_index = soh_feature_index
         super().__init__(train_cfg)
 
     def _create_model(self) -> nn.Module:
-        return TemporalTransformer(self.cfg, input_dim=self._input_dim)
+        return TemporalTransformer(
+            self.cfg,
+            input_dim=self._input_dim,
+            soh_feature_index=self._soh_feature_index,
+        )
 
     def _create_optimizer(self, model: nn.Module) -> torch.optim.Optimizer:
         # Transformer 通常用较小的学习率
@@ -587,6 +605,7 @@ class EnsembleTrainer:
         self.transformer_trainer = None
         self.ensemble = EnsembleModel(cfg)
         self.results: Dict[str, Any] = {}
+        self.soh_feature_index = ACTUAL_FEATURE_COLUMNS.index(FEATURE_CFG.target_col)
 
     def train_all(self, pipeline_output: dict,
                   epochs: Optional[Dict[str, int]] = None,
@@ -628,7 +647,13 @@ class EnsembleTrainer:
 
         # 从数据中推断实际特征维度
         n_features = X_train.shape[2]  # (samples, seq_len, n_features)
+        feature_cols = pipeline_output.get('feature_cols') or ACTUAL_FEATURE_COLUMNS[:n_features]
+        if FEATURE_CFG.target_col not in feature_cols:
+            raise ValueError(f"训练特征缺少 '{FEATURE_CFG.target_col}'，无法进行残差学习")
+        self.soh_feature_index = feature_cols.index(FEATURE_CFG.target_col)
+        self.xgb_trainer.model.soh_feature_index = self.soh_feature_index
         logger.info(f"  输入特征维度: {n_features} (seq_len={X_train.shape[1]})")
+        logger.info(f"  残差学习锚点: {FEATURE_CFG.target_col}[{self.soh_feature_index}]")
 
         # ── 1. XGBoost ──
         if not skip_xgb:
@@ -666,7 +691,10 @@ class EnsembleTrainer:
             lstm_batch = epoch_cfg.get('lstm_batch', LSTM_CFG.batch_size)
 
             if self.lstm_trainer is None:
-                self.lstm_trainer = LSTMTrainer(input_dim=n_features)
+                self.lstm_trainer = LSTMTrainer(
+                    input_dim=n_features,
+                    soh_feature_index=self.soh_feature_index,
+                )
 
             lstm_model, lstm_hist = self.lstm_trainer.fit(
                 X_train, y_train,
@@ -693,7 +721,10 @@ class EnsembleTrainer:
             tf_batch = epoch_cfg.get('transformer_batch', TRANSFORMER_CFG.batch_size)
 
             if self.transformer_trainer is None:
-                self.transformer_trainer = TransformerTrainer(input_dim=n_features)
+                self.transformer_trainer = TransformerTrainer(
+                    input_dim=n_features,
+                    soh_feature_index=self.soh_feature_index,
+                )
 
             tf_model, tf_hist = self.transformer_trainer.fit(
                 X_train, y_train,
@@ -723,6 +754,8 @@ class EnsembleTrainer:
             elif self.transformer_trainer is not None:
                 self.ensemble.to(self.transformer_trainer.device)
 
+            if X_val is not None and y_val is not None:
+                self._set_validation_weights(X_val, y_val)
             test_results = self._evaluate_test(X_test, y_test)
 
         # ── 5. 汇总 ──
@@ -765,12 +798,37 @@ class EnsembleTrainer:
             axis=1
         )
 
+    def _set_validation_weights(self, X_val: np.ndarray, y_val: np.ndarray):
+        """按验证集 MSE 的倒数设置可用子模型权重。"""
+        predictions = self.ensemble.predict(X_val)
+        losses = {
+            name: float(np.mean((pred - y_val) ** 2))
+            for name, pred in predictions.items()
+            if name != 'ensemble'
+        }
+        if not losses:
+            return
+        inverse = {name: 1.0 / max(loss, 1e-12) for name, loss in losses.items()}
+        total = sum(inverse.values())
+        normalized = {name: value / total for name, value in inverse.items()}
+        self.ensemble.set_weights(
+            xgb=normalized.get('xgb', 0.0),
+            lstm=normalized.get('lstm', 0.0),
+            transformer=normalized.get('transformer', 0.0),
+        )
+        logger.info(f"  验证集模型 MSE: {losses}")
+
     def _evaluate_test(self, X_test: np.ndarray,
                        y_test: np.ndarray) -> Dict[str, float]:
         """在测试集上评估所有模型"""
         from sklearn.metrics import mean_squared_error, mean_absolute_error
 
         predictions = self.ensemble.predict(X_test)
+        predictions['persistence'] = np.repeat(
+            X_test[:, -1, self.soh_feature_index:self.soh_feature_index + 1],
+            y_test.shape[1] if y_test.ndim > 1 else 1,
+            axis=1,
+        )
         results = {}
 
         for name, pred in predictions.items():
