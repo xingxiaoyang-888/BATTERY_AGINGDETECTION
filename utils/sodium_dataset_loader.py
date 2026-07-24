@@ -240,7 +240,10 @@ class RWTHCommercialAgingLoader:
         numeric_columns = (expected - {"Time"}) | ({"Temperature"} & set(frame.columns))
         for column in numeric_columns:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
-        frame["Time"] = pd.to_timedelta(frame["Time"], errors="coerce")
+        if pd.api.types.is_numeric_dtype(frame["Time"]):
+            frame["Time"] = pd.to_timedelta(frame["Time"], unit="h", errors="coerce")
+        else:
+            frame["Time"] = pd.to_timedelta(frame["Time"], errors="coerce")
         frame = frame.dropna(subset=["Time", "Voltage", "Current", "Ah_counter"])
         return start_time, frame
 
@@ -278,6 +281,8 @@ class RWTHCommercialAgingLoader:
                     else fallback_temperature_c
                 ),
                 "duration_h": duration_h,
+                "voltage_min_v": float(np.nanmin(voltage)),
+                "voltage_max_v": float(np.nanmax(voltage)),
             })
         return segments
 
@@ -290,7 +295,7 @@ class RWTHCommercialAgingLoader:
         segments = cls._capacity_segments(frame, meta["temperature_c"])
         discharges = [item for item in segments if item["direction"] == "discharge"]
         charges = [item for item in segments if item["direction"] == "charge"]
-        cycles = []
+        candidates = []
         for discharge in discharges:
             c_rate = discharge["mean_current_a"] / cls.NOMINAL_CAPACITY_AH
             is_reference = 0.35 <= c_rate <= 0.65
@@ -299,11 +304,23 @@ class RWTHCommercialAgingLoader:
             expected_capacity = cls.NOMINAL_CAPACITY_AH * meta["dod"]
             if discharge["capacity_ah"] < max(0.05, 0.5 * expected_capacity):
                 continue
+            if meta["dod"] == 1.0 and not (
+                discharge["voltage_min_v"] <= 1.7
+                and discharge["voltage_max_v"] >= 3.4
+            ):
+                continue
             if file_kind == "cu" and not is_reference:
                 continue
-            if file_kind != "cu" and not (is_reference or is_aging_rate):
+            if file_kind != "cu" and not is_aging_rate:
                 continue
+            candidates.append((discharge, is_reference))
 
+        # 每个 CU 文件只保留容量最大的完整 0.5C 放电，排除预放电和脉冲步骤。
+        if file_kind == "cu" and candidates:
+            candidates = [max(candidates, key=lambda item: item[0]["capacity_ah"])]
+
+        cycles = []
+        for discharge, is_reference in candidates:
             nearest_charge = min(
                 charges,
                 key=lambda item: abs(item["step_id"] - discharge["step_id"]),
@@ -345,14 +362,18 @@ class RWTHCommercialAgingLoader:
         import zipfile
 
         by_cell: Dict[str, List[CycleData]] = defaultdict(list)
+        reference_by_cell: Dict[str, List[CycleData]] = defaultdict(list)
         condition_by_cell: Dict[str, str] = {}
         with zipfile.ZipFile(archive_path) as archive:
+            processed_files = 0
             for info in archive.infolist():
                 if info.is_dir() or not info.filename.lower().endswith(".ird"):
                     continue
                 parts = info.filename.split("/")
                 condition = parts[0]
                 if not condition.startswith("DOD"):
+                    continue
+                if cls._condition_metadata(condition)["dod"] != 1.0:
                     continue
                 filename = parts[-1]
                 cell_id = filename.split("_", 1)[0].split(".", 1)[0]
@@ -366,11 +387,20 @@ class RWTHCommercialAgingLoader:
                 except (ValueError, pd.errors.ParserError) as exc:
                     logger.warning("跳过 RWTH 文件 %s: %s", info.filename, exc)
                     continue
-                by_cell[cell_id].extend(cycles)
+                if file_kind == "cu":
+                    reference_by_cell[cell_id].extend(cycles)
+                else:
+                    by_cell[cell_id].extend(cycles)
                 condition_by_cell[cell_id] = condition
+                processed_files += 1
+                if processed_files % 50 == 0:
+                    logger.info("RWTH DOD100 解析进度: %d 个 IRD 文件", processed_files)
 
         cells = []
         for cell_id, cycles in sorted(by_cell.items()):
+            if not cycles:
+                logger.warning("RWTH 电芯没有可用容量标签: %s", cell_id)
+                continue
             cycles.sort(key=lambda item: (item.timestamp or 0, item.metadata.get("source_file", "")))
             for index, cycle in enumerate(cycles, start=1):
                 cycle.cycle_index = index
@@ -383,6 +413,14 @@ class RWTHCommercialAgingLoader:
                 metadata={
                     "dataset_id": cls.DATASET_ID,
                     "condition": condition,
+                    "reference_capacity_checks": [
+                        {
+                            "timestamp": cycle.timestamp,
+                            "capacity_ah": cycle.discharge_capacity_ah,
+                            "source_file": cycle.metadata.get("source_file"),
+                        }
+                        for cycle in reference_by_cell.get(cell_id, [])
+                    ],
                     **cls._condition_metadata(condition),
                 },
             ))
@@ -397,9 +435,23 @@ class RWTHCommercialAgingLoader:
         if not archives:
             logger.info("RWTH 整包尚未解压到 %s，本次跳过", base)
             return []
+        import zipfile
+        with zipfile.ZipFile(archives[0]) as archive:
+            source_cells = {
+                info.filename.split("/")[-1].split("_", 1)[0].split(".", 1)[0]
+                for info in archive.infolist()
+                if not info.is_dir()
+                and info.filename.lower().endswith(".ird")
+                and info.filename.startswith("DOD")
+            }
+        if len(source_cells) != 67:
+            raise ValueError(f"RWTH 原始循环老化电芯应为 67 只，实际发现 {len(source_cells)} 只")
         cells = cls._load_zip(archives[0])
-        if len(cells) != 67:
-            raise ValueError(f"RWTH 循环老化电芯应为 67 只，实际解析到 {len(cells)} 只")
+        if len(cells) != 47:
+            raise ValueError(
+                f"RWTH DOD100 主训练集应有 47 只有效电芯，实际解析到 {len(cells)} 只"
+            )
+        logger.info("RWTH 主训练集: 47 只 DOD100 电芯；20 只保留用于稀疏/跨 DOD 评估")
         return cells
 
 

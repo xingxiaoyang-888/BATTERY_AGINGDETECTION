@@ -140,6 +140,20 @@ class TestSodiumIsolation(unittest.TestCase):
         self.assertFalse(cell_sets[0] & cell_sets[2])
         self.assertFalse(cell_sets[1] & cell_sets[2])
 
+    def test_large_cell_dataset_uses_ratio_split(self):
+        rows = []
+        for cell_index in range(20):
+            for cycle_index in range(40):
+                rows.append({
+                    "cell_id": f"cell-{cell_index}",
+                    "cycle_index": cycle_index + 1,
+                    "soh": 1.0 - cycle_index * 0.001,
+                })
+        splits = DataSplitter().split(pd.DataFrame(rows))
+        counts = {name: frame["cell_id"].nunique() for name, frame in splits.items()}
+
+        self.assertEqual(counts, {"train": 14, "val": 3, "test": 3})
+
     def test_rwth_ird_parser_extracts_reference_capacity(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp, "S2000TEST_CU_at25degC_V00.ird")
@@ -187,6 +201,26 @@ class TestSodiumIsolation(unittest.TestCase):
 
         self.assertEqual(len(cycles), 1)
         self.assertEqual(cycles[0].temperature_c, 25.0)
+
+    def test_rwth_numeric_time_is_measured_in_hours(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "S2000TEST.ird")
+            path.write_text(
+                "Starttime: '2023-01-01 00:00:00'\n###\n"
+                "Current,Voltage,Ah_counter,Time,StepID\n"
+                "-1.2,3.8,1.2,0.0,1\n"
+                "-1.2,1.5,0.0,1.0,1\n",
+                encoding="utf-8",
+            )
+            with path.open("rb") as source:
+                start_time, frame = RWTHCommercialAgingLoader._read_ird(source, path.name)
+            cycles = RWTHCommercialAgingLoader._cycles_from_measurement(
+                frame, "DOD100_1C1C_RT", start_time, "cycling", path.name
+            )
+
+        self.assertEqual(frame["Time"].iloc[-1], pd.Timedelta(hours=1))
+        self.assertEqual(len(cycles), 1)
+        self.assertAlmostEqual(cycles[0].discharge_capacity_ah, 1.2)
 
 
 class TestSodiumAudit(unittest.TestCase):

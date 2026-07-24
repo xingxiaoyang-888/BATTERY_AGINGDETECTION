@@ -145,9 +145,10 @@ class CycleFeatureExtractor:
         result_df.insert(0, 'cell_id', cell.cell_id)
         result_df.insert(1, 'chemistry', cell.chemistry)
         result_df.insert(2, 'dataset_id', cell.metadata.get('dataset_id', 'wenzhou-sodium-ion'))
-        result_df.insert(3, 'nominal_capacity_ah', cell.nominal_capacity_ah)
+        result_df.insert(3, 'condition', cell.metadata.get('condition', 'unknown'))
+        result_df.insert(4, 'nominal_capacity_ah', cell.nominal_capacity_ah)
         for col in result_df.columns:
-            if col not in {'cell_id', 'chemistry', 'dataset_id'}:
+            if col not in {'cell_id', 'chemistry', 'dataset_id', 'condition'}:
                 result_df[col] = pd.to_numeric(result_df[col], errors='coerce')
 
         return result_df
@@ -310,7 +311,7 @@ class DataCleaner:
         # Step 7: 仅用历史值前向填充，避免未来循环信息泄漏到当前循环。
         if 'cell_id' in df.columns:
             fill_cols = [c for c in df.columns
-                         if c not in ['cell_id', 'chemistry', 'dataset_id', 'soh_raw']]
+                         if c not in ['cell_id', 'chemistry', 'dataset_id', 'condition', 'soh_raw']]
             for col in fill_cols:
                 if df[col].isnull().any():
                     df[col] = df.groupby('cell_id')[col].transform(
@@ -480,7 +481,7 @@ class SequenceBuilder:
             # 优先使用配置里定义的真实输入列，避免把趋势/标签/派生列误喂给模型
             feature_cols = [c for c in FEATURE_CFG.all_features if c in df.columns]
             if not feature_cols:
-                exclude = ['cell_id', 'chemistry', 'dataset_id', 'cycle_index',
+                exclude = ['cell_id', 'chemistry', 'dataset_id', 'condition', 'cycle_index',
                            'soh_raw', 'soh_jump_flag', target_col]
                 feature_cols = [c for c in df.columns if c not in exclude and df[c].dtype in ('float64', 'float32', 'int64', 'int32')]
         # 确保目标列可用
@@ -564,7 +565,11 @@ class DataSplitter:
         n_cells = len(cells)
 
         if method == "auto":
-            method = "leave_one_cell_out" if self.cfg.leave_one_cell_out else "random_cell"
+            method = (
+                "leave_one_cell_out"
+                if self.cfg.leave_one_cell_out and n_cells < 10
+                else "random_cell"
+            )
 
         logger.info(f"  数据划分方法: {method}, 共 {n_cells} 个电芯")
 
@@ -906,7 +911,7 @@ class SOHDataPipeline:
         # Stage 5: 序列构建
         logger.info("[Stage 5/5] 序列窗口构建...")
         feature_cols = [c for c in clean_df.columns
-                       if c not in ['cell_id', 'chemistry', 'dataset_id', 'cycle_index',
+                       if c not in ['cell_id', 'chemistry', 'dataset_id', 'condition', 'cycle_index',
                                     'soh_raw', 'soh_jump_flag']
                        and clean_df[c].dtype in ('float64', 'float32', 'int64', 'int32')]
 
@@ -980,7 +985,7 @@ class SOHDataPipeline:
         target_col = FEATURE_CFG.target_col
 
         # 确定需要标准化的特征列（排除目标列和元数据列）
-        exclude = ['cell_id', 'chemistry', 'dataset_id', 'cycle_index',
+        exclude = ['cell_id', 'chemistry', 'dataset_id', 'condition', 'cycle_index',
                    'soh_raw', 'soh_jump_flag', target_col]
         feature_cols = [c for c in full_df.columns
                        if c not in exclude and full_df[c].dtype in ('float64', 'float32', 'int64', 'int32')]
@@ -1018,7 +1023,7 @@ class SOHDataPipeline:
           - 如果源域不可用，回退到目标域 train 集拟合
         """
         target_col = FEATURE_CFG.target_col
-        exclude = ['cell_id', 'chemistry', 'dataset_id', 'cycle_index',
+        exclude = ['cell_id', 'chemistry', 'dataset_id', 'condition', 'cycle_index',
                    'soh_raw', 'soh_jump_flag', target_col]
         feature_cols = [c for c in full_df.columns
                        if c not in exclude and full_df[c].dtype in ('float64', 'float32', 'int64', 'int32')]

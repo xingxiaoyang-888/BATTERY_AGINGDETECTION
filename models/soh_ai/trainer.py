@@ -1200,7 +1200,7 @@ class CrossValidator:
 
         feature_cols = pipeline_output.get('feature_cols')
         if not feature_cols:
-            exclude = {'cell_id', 'chemistry', 'dataset_id', 'cycle_index', 'soh_raw', 'soh_jump_flag', FEATURE_CFG.target_col}
+            exclude = {'cell_id', 'chemistry', 'dataset_id', 'condition', 'cycle_index', 'soh_raw', 'soh_jump_flag', FEATURE_CFG.target_col}
             feature_cols = [
                 c for c in feature_df.columns
                 if c not in exclude and feature_df[c].dtype.kind in 'fiu'

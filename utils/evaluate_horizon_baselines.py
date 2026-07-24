@@ -27,7 +27,7 @@ from utils.sodium_dataset_loader import SodiumDatasetLoader
 
 def _feature_columns(df: pd.DataFrame) -> List[str]:
     exclude = {
-        "cell_id", "chemistry", "dataset_id", "cycle_index",
+        "cell_id", "chemistry", "dataset_id", "condition", "cycle_index",
         "soh_raw", "soh_jump_flag",
     }
     return [col for col in df.columns if col not in exclude and df[col].dtype.kind in "fiu"]
