@@ -222,6 +222,26 @@ class TestSodiumIsolation(unittest.TestCase):
         self.assertEqual(len(cycles), 1)
         self.assertAlmostEqual(cycles[0].discharge_capacity_ah, 1.2)
 
+    def test_rwth_high_rate_voltage_sag_is_not_rejected(self):
+        frame = pd.DataFrame({
+            "Time": pd.to_timedelta([0.0, 0.1], unit="h"),
+            "Voltage": [3.38, 1.5],
+            "Current": [-9.6, -9.6],
+            "Ah_counter": [1.1, 0.0],
+            "Temperature": [25.0, 25.0],
+            "StepID": [1, 1],
+        })
+        cycles = RWTHCommercialAgingLoader._cycles_from_measurement(
+            frame,
+            "DOD100_5C8C_RT",
+            pd.Timestamp("2023-01-01"),
+            "cycling",
+            "S2000TEST.ird",
+        )
+
+        self.assertEqual(len(cycles), 1)
+        self.assertAlmostEqual(cycles[0].discharge_capacity_ah, 1.1)
+
 
 class TestSodiumAudit(unittest.TestCase):
     def test_horizon_metric_returns_physical_rmse(self):

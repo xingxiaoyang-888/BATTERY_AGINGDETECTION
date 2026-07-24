@@ -304,10 +304,9 @@ class RWTHCommercialAgingLoader:
             expected_capacity = cls.NOMINAL_CAPACITY_AH * meta["dod"]
             if discharge["capacity_ah"] < max(0.05, 0.5 * expected_capacity):
                 continue
-            if meta["dod"] == 1.0 and not (
-                discharge["voltage_min_v"] <= 1.7
-                and discharge["voltage_max_v"] >= 3.4
-            ):
+            # 高倍率放电存在明显欧姆压降，负载电压未必达到 3.4 V；
+            # 完整性以倍率匹配、容量门槛和到达下截止电压共同保证。
+            if meta["dod"] == 1.0 and discharge["voltage_min_v"] > 1.7:
                 continue
             if file_kind == "cu" and not is_reference:
                 continue
