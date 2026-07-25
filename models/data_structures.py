@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 from datetime import datetime
 import numpy as np
 
@@ -36,10 +36,16 @@ class SimulationConfig:
     profile_mode: str = "CC"          # 工况模式: CC (恒流) 或 CSV
     sim_duration_s: float = 600.0     # 仿真总时长
     pack_current_a: float = 80.0      # 总线电流
+    current_profile: Optional[List[Tuple[float, float]]] = None  # [(time_s, current_a), ...]
     env_temp_c: float = 25.0          # 环境温度
-    cooling_type: str = "Liquid Cooling" # 热管理策略
+    initial_cell_temp_c: Optional[float] = None
+    cooling_type: str = "liquid"      # 当前 FMU 使用液冷板模型
+    coolant_inlet_temp_c: Optional[float] = None
+    coolant_flow_kg_s: float = 0.035
+    cooling_ua_w_per_k: float = 2.0
     init_soc: float = 90.0            # 初始荷电状态
     init_soh: float = 100.0           # 初始健康状态
+    cell_capacity_ah: float = 50.0
     
     # Pack 拓扑与故障注入参数
     series_num: int = 8               # Ns (串联数)
@@ -64,6 +70,10 @@ class KPIResult:
     soh_loss_ppm: float = 0.0
     max_temp_c: float = 0.0
     avg_delta_t: float = 0.0
+    max_delta_t: float = 0.0
+    ah_throughput: float = 0.0
+    equivalent_full_cycles: float = 0.0
+    energy_throughput_kwh: float = 0.0
     max_discharge_power_kw: float = 0.0
     max_charge_power_kw: float = 0.0
     diagnostic_warnings: List[str] = field(default_factory=list)
@@ -75,7 +85,11 @@ class KPIResult:
             "soh": round(self.final_soh, 4),
             "loss_ppm": round(self.soh_loss_ppm, 2),
             "max_temp": round(self.max_temp_c, 1),
-            "delta_t": round(self.avg_delta_t, 1),
+            "delta_t": round(self.max_delta_t, 2),
+            "avg_delta_t": round(self.avg_delta_t, 2),
+            "ah_throughput": round(self.ah_throughput, 4),
+            "efc": round(self.equivalent_full_cycles, 6),
+            "energy_throughput_kwh": round(self.energy_throughput_kwh, 6),
             "sop_dch": round(self.max_discharge_power_kw, 1),
             "warnings": "|".join(self.diagnostic_warnings)
         }

@@ -38,14 +38,38 @@ class BatteryDigitalTwin:
         # --- A. 物理引擎解算 ---
         # 注入信号：FMU 唯一运行时输入是 I_load_external
         # 故障参数为编译时固定，需重新导出 FMU 才能改变
-        fmu_inputs = {
-            'I_load_external': config.pack_current_a,
+        fmu_inputs = {'I_load_external': config.pack_current_a}
+        initial_temp_c = (
+            config.initial_cell_temp_c
+            if config.initial_cell_temp_c is not None else config.env_temp_c
+        )
+        coolant_temp_c = (
+            config.coolant_inlet_temp_c
+            if config.coolant_inlet_temp_c is not None else config.env_temp_c
+        )
+        fmu_parameters = {
+            'pack.cellData.SOC_start': config.init_soc / 100.0,
+            'pack.cellData.T_start': initial_temp_c + 273.15,
+            'pack.cellData.Q_nominal': config.cell_capacity_ah * 3600.0,
+            'cooling.data.T_coolant_in': coolant_temp_c + 273.15,
+            'cooling.data.m_flow': config.coolant_flow_kg_s,
+            'cooling.data.UA_cell': config.cooling_ua_w_per_k,
+            'pack.faultMode': config.fault_mode,
+            'pack.faultSeriesIndex': config.fault_s_index,
+            'pack.faultParallelIndex': config.fault_p_index,
+            'pack.faultSeverity': config.fault_severity,
+            'cooling.faultMode': config.fault_mode,
+            'cooling.faultSeriesIndex': config.fault_s_index,
+            'cooling.faultParallelIndex': config.fault_p_index,
+            'cooling.faultSeverity': config.fault_severity,
         }
         
         # 执行联合仿真（Ns/Np 由 FMU 内部自动检测）
         df_raw, temp_matrix_3d, soc_matrix_3d, soh_matrix_3d = self.fmu_engine.run_simulation(
             stop_time=config.sim_duration_s,
             inputs=fmu_inputs,
+            parameters=fmu_parameters,
+            current_profile=config.current_profile,
         )
         
         if df_raw is None or df_raw.empty:
@@ -82,25 +106,39 @@ class BatteryDigitalTwin:
                                 if np.isnan(frame[s][p]):
                                     frame[s][p] = fallback
 
-        # --- C. 寿命损耗计算 ---
-        # 提取全过程平均参数进行累计损伤评估
-        avg_temp_c = df_raw['pack.T_max'].mean() - 273.15
-        avg_current = config.pack_current_a
-        
-        # 调用 NREL 衰减模型
-        step_loss = AgingModel.calculate_step_loss(
-            temp_c=avg_temp_c,
-            current_a=avg_current,
-            soc_pct=config.init_soc,
-            dt_seconds=config.sim_duration_s,
-            cell_capacity_ah=50.0 # 适配 SodiumIonBattery.mo 标定值
+        # --- C. 寿命损耗与工况应力计算 ---
+        timestamps = df_raw['time'].to_numpy(dtype=float)
+        currents = df_raw['pack.I_pack'].to_numpy(dtype=float)
+        voltages = df_raw['pack.V_pack'].to_numpy(dtype=float)
+        dt = np.diff(timestamps)
+        ah_throughput = float(np.sum(np.abs(currents[:-1]) * dt) / 3600.0) if len(dt) else 0.0
+        energy_throughput_kwh = (
+            float(np.sum(np.abs(voltages[:-1] * currents[:-1]) * dt) / 3.6e6)
+            if len(dt) else 0.0
         )
+        efc = ah_throughput / max(2.0 * config.cell_capacity_ah, 1e-9)
+
+        # FMU内部已使用钠电老化参数，Python端只读取相对损失，避免重复叠加锂电公式。
+        if 'pack.SOH_min' in df_raw and np.isfinite(df_raw['pack.SOH_min']).all():
+            step_loss = max(
+                0.0,
+                float(df_raw['pack.SOH_min'].iloc[0] - df_raw['pack.SOH_min'].iloc[-1]),
+            )
+        else:
+            step_loss = AgingModel.calculate_step_loss(
+                temp_c=float(df_raw['pack.T_max'].mean() - 273.15),
+                current_a=float(np.mean(currents)),
+                soc_pct=config.init_soc,
+                dt_seconds=config.sim_duration_s,
+                cell_capacity_ah=config.cell_capacity_ah,
+            )
         final_soh = max(0.0, config.init_soh - step_loss * 100)
 
         # --- D. SOP 功率边界计算 (保留 V1.0 的严谨性并适配钠电)  ---
         final_v = df_raw['pack.V_pack'].iloc[-1]
         final_soc = df_raw['pack.SOC_min'].iloc[-1] * 100
         max_temp_c = df_raw['pack.T_max'].max() - 273.15
+        delta_t_series = df_raw['pack.T_max'] - df_raw['pack.T_min']
         
         # 钠离子电池动态内阻估算（使用 FMU 内部实际维度）
         Ns_fmu = self.fmu_engine.Ns
@@ -116,7 +154,11 @@ class BatteryDigitalTwin:
             final_soh=final_soh,
             soh_loss_ppm=step_loss * 1e6,
             max_temp_c=max_temp_c,
-            avg_delta_t=max_temp_c - config.env_temp_c,
+            avg_delta_t=float(delta_t_series.mean()),
+            max_delta_t=float(delta_t_series.max()),
+            ah_throughput=ah_throughput,
+            equivalent_full_cycles=efc,
+            energy_throughput_kwh=energy_throughput_kwh,
             max_discharge_power_kw=p_dch_peak / 1000.0,
             max_charge_power_kw=p_chg_peak / 1000.0
         )
@@ -124,6 +166,8 @@ class BatteryDigitalTwin:
         # 触发告警状态机
         if max_temp_c > 50.0: kpis.diagnostic_warnings.append(" 严重热失控风险：电芯温度超标")
         if final_soc < 5.0: kpis.diagnostic_warnings.append(" 低电量预警：请及时充电")
+        if config.init_soh < 99.999:
+            kpis.diagnostic_warnings.append(" 初始SOH当前作为寿命偏置使用，尚未反馈到FMU内阻")
 
         # 封装时序对象
         ts_data = TimeSeriesData()

@@ -164,8 +164,11 @@ def render_sidebar():
         config['env_temp'] = st.slider("环境温度 (°C)", -30, 60, 25)
         config['cooling_type'] = st.selectbox(
             "热管理系统 (TMS)",
-            ["Natural", "Air Cooling", "Liquid Cooling", "Liquid Heating", "Immersion"]
+            ["Liquid Cooling"],
+            help="当前已导出的FMU仅完成液冷板模型验证"
         )
+        config['coolant_flow_kg_s'] = 0.035
+        config['cooling_ua_w_per_k'] = 2.0
 
         # === 4. 初始状态 ===
         st.markdown("#### 4. 初始状态")

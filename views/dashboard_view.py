@@ -73,6 +73,7 @@ def render_dashboard():
     config = render_sidebar()
     
     # 2. CSV 处理
+    profile_data = None
     if config['uploaded_file'] is not None:
         profile_data, msg = parse_profile_csv(config['uploaded_file'])
         if profile_data: config['sim_duration'] = profile_data['duration']
@@ -101,7 +102,13 @@ def render_dashboard():
                 payload = {
                     "duration_s": config.get('sim_duration', 600.0),
                     "pack_current": config.get('pack_current', 50.0),
+                    "current_profile": profile_data['points'] if profile_data else None,
                     "env_temp": config.get('env_temp', 25.0),
+                    "initial_cell_temp": config.get('env_temp', 25.0),
+                    "coolant_inlet_temp": config.get('env_temp', 25.0),
+                    "coolant_flow_kg_s": config.get('coolant_flow_kg_s', 0.035),
+                    "cooling_ua_w_per_k": config.get('cooling_ua_w_per_k', 2.0),
+                    "cell_capacity_ah": config.get('cell_capacity', 50.0),
                     "init_soc": config.get('init_soc', 80.0),
                     "init_soh": config.get('init_soh', 100.0),
                     "series_num": config.get('series_num', 8),
@@ -114,7 +121,7 @@ def render_dashboard():
                 }
 
                 # 发起网络请求
-                response = requests.post(API_URL, json=payload)
+                response = requests.post(API_URL, json=payload, timeout=180)
                 response.raise_for_status()  # 如果后端报错，这里会拦截
                 
                 # 解析云端返回的数据
