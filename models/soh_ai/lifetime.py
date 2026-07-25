@@ -575,11 +575,16 @@ class SodiumLifetimePredictor:
         cohort_rate = _weighted_quantile(cohort_rates, cohort_weights, 0.50)
         history_rate = self._history_rate(normalized_history)
         ai_rate = self._ai_rate(normalized_history, normalized_scenario)
+        physical_stress_multiplier = float(np.clip(stress['combined'], 0.25, 4.0))
 
         sources = [('rwth_cohort', cohort_rate, 0.60)]
         if history_rate is not None and history_rate > 0:
             history_weight = min(0.55, 0.15 + len(normalized_history) / 80.0)
-            sources.append(('cell_history', history_rate, history_weight))
+            sources.append((
+                'cell_history_stress_adjusted',
+                history_rate * physical_stress_multiplier,
+                history_weight,
+            ))
         if ai_rate is not None and ai_rate > 0:
             plausible_low = max(_weighted_quantile(cohort_rates, cohort_weights, 0.10) * 0.1, 1e-8)
             plausible_high = max(_weighted_quantile(cohort_rates, cohort_weights, 0.90) * 10.0, plausible_low)
@@ -613,6 +618,7 @@ class SodiumLifetimePredictor:
             + 0.10 * float(ai_rate is not None)
         )
         confidence_cap = 0.80 if event_count >= 20 else 0.65 if event_count >= 10 else 0.45
+        confidence_cap = min(confidence_cap, 0.80 - 0.35 * domain['ood_score'])
         confidence = float(np.clip(min(confidence, confidence_cap), 0.05, 0.95))
         level = 'high' if confidence >= 0.75 else 'medium' if confidence >= 0.50 else 'low'
 
@@ -659,7 +665,10 @@ class SodiumLifetimePredictor:
                 'interval_basis': 'RWTH matched-cohort weighted 10%-90% rates, OOD/censoring widened',
             },
             'domain_check': domain,
-            'stress': {key: round(value, 5) for key, value in stress.items()},
+            'stress': {
+                **{key: round(value, 5) for key, value in stress.items()},
+                'history_rate_multiplier': round(physical_stress_multiplier, 5),
+            },
             'evidence': {
                 'dataset': 'RWTH commercial sodium-ion aging, DOD100 subset',
                 'cells': cell_count,

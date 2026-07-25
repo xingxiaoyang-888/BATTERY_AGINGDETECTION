@@ -116,6 +116,39 @@ class TestSodiumLifetime(unittest.TestCase):
         with self.assertRaises(ValueError):
             predictor.predict(0.95, 10, scenario={'c_rate_discharge': -1})
 
+    def test_higher_thermal_and_electrical_stress_cannot_extend_rul(self):
+        predictor = SodiumLifetimePredictor(_reference_frame(), use_ai=False)
+        history = [
+            {'cycle_index': cycle, 'soh': 1.0 - 0.001 * cycle}
+            for cycle in range(1, 33)
+        ]
+        nominal = predictor.predict(
+            0.968,
+            32,
+            eol_threshold=0.80,
+            history=history,
+            scenario={'temperature_c': 25, 'c_rate_charge': 1, 'c_rate_discharge': 1},
+        )
+        stressed = predictor.predict(
+            0.968,
+            32,
+            eol_threshold=0.80,
+            history=history,
+            scenario={
+                'temperature_c': 55,
+                'temperature_spread_c': 10,
+                'c_rate_charge': 5,
+                'c_rate_discharge': 8,
+            },
+        )
+
+        self.assertLessEqual(
+            stressed['prediction']['rul_cycles'],
+            nominal['prediction']['rul_cycles'],
+        )
+        self.assertGreater(stressed['stress']['history_rate_multiplier'], 1.0)
+        self.assertLess(stressed['uncertainty']['confidence_score'], 0.8)
+
 
 if __name__ == '__main__':
     unittest.main()
