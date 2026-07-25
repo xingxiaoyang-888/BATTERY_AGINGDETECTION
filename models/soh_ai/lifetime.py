@@ -182,6 +182,8 @@ class SodiumLifetimePredictor:
         self._ai_model = None
         self._ai_scaler = None
         self._ai_load_error: Optional[str] = None
+        self._last_ai_rate_key = None
+        self._last_ai_rate_value: Optional[float] = None
 
     def _validate_reference(self) -> None:
         required = {'cell_id', 'cycle_index', 'soh', *self.cohort_columns}
@@ -440,6 +442,12 @@ class SodiumLifetimePredictor:
         history: Sequence[Dict[str, Any]],
         scenario: Dict[str, float],
     ) -> Optional[float]:
+        cache_key = (
+            tuple((int(item['cycle_index']), round(float(item['soh']), 8)) for item in history),
+            tuple((name, round(float(scenario[name]), 8)) for name in sorted(scenario)),
+        )
+        if cache_key == self._last_ai_rate_key:
+            return self._last_ai_rate_value
         window = self._model_window(history, scenario)
         if window is None or not self._load_ai():
             return None
@@ -469,7 +477,10 @@ class SodiumLifetimePredictor:
                 x_scaler=self._ai_scaler,
             )
             start_soh = float(window['soh'].iloc[-1])
-            return max((start_soh - float(trajectory[-1])) / MODEL_VALIDATED_HORIZON, 0.0)
+            value = max((start_soh - float(trajectory[-1])) / MODEL_VALIDATED_HORIZON, 0.0)
+            self._last_ai_rate_key = cache_key
+            self._last_ai_rate_value = value
+            return value
         except Exception as exc:
             self._ai_load_error = str(exc)
             return None

@@ -73,14 +73,30 @@ def evaluate_leave_one_cell_out(
     use_ai: bool = False,
     weights_dir: str | Path | None = None,
     progress_every: int = 5,
+    test_cells: Sequence[str] | None = None,
+    exclude_all_test_cells_from_reference: bool = False,
 ) -> Dict[str, Any]:
     thresholds = tuple(float(value) for value in thresholds)
     outcomes = build_eol_labels(frame, thresholds).set_index(['cell_id', 'eol_soh_threshold'])
-    cells = sorted(frame['cell_id'].astype(str).unique())
+    all_cells = sorted(frame['cell_id'].astype(str).unique())
+    cells = sorted(str(cell) for cell in test_cells) if test_cells is not None else all_cells
+    unknown = sorted(set(cells) - set(all_cells))
+    if unknown:
+        raise ValueError(f'测试电芯不在特征表中: {unknown}')
+    fixed_reference = (
+        frame[~frame['cell_id'].astype(str).isin(cells)].copy()
+        if exclude_all_test_cells_from_reference else None
+    )
+    if fixed_reference is not None and fixed_reference['cell_id'].nunique() < 3:
+        raise ValueError('固定参考队列至少需要 3 只非测试电芯')
     rows: List[Dict[str, Any]] = []
 
     for fold_index, cell_id in enumerate(cells, start=1):
-        train = frame[frame['cell_id'].astype(str) != cell_id].copy()
+        train = (
+            fixed_reference
+            if fixed_reference is not None
+            else frame[frame['cell_id'].astype(str) != cell_id].copy()
+        )
         test = frame[frame['cell_id'].astype(str) == cell_id].sort_values('cycle_index').copy()
         predictor = SodiumLifetimePredictor(train, weights_dir=weights_dir, use_ai=use_ai)
 
@@ -155,9 +171,21 @@ def evaluate_leave_one_cell_out(
     }
     return {
         'protocol': {
-            'name': 'leave-one-cell-out lifetime backtest',
-            'leakage_control': 'held-out cell excluded from cohort, EOL labels and rate estimation',
+            'name': (
+                'fixed cell holdout lifetime backtest'
+                if exclude_all_test_cells_from_reference
+                else 'leave-one-cell-out lifetime backtest'
+            ),
+            'leakage_control': (
+                'all fixed test cells excluded from cohort, EOL labels and rate estimation'
+                if exclude_all_test_cells_from_reference
+                else 'held-out cell excluded from cohort, EOL labels and rate estimation'
+            ),
             'cells': len(cells),
+            'reference_cells': int(
+                fixed_reference['cell_id'].nunique()
+                if fixed_reference is not None else frame['cell_id'].nunique() - 1
+            ),
             'thresholds': list(thresholds),
             'observation_fractions': list(observation_fractions),
             'right_censoring': 'no synthetic RUL; lower-bound consistency only',
@@ -186,15 +214,25 @@ def main() -> int:
     parser.add_argument('--fractions', nargs='+', type=float, default=[0.25, 0.50, 0.75])
     parser.add_argument('--use-ai', action='store_true')
     parser.add_argument('--weights-dir')
+    parser.add_argument(
+        '--test-split',
+        help='冻结测试集 Parquet；提供后从参考队列中排除其中全部电芯',
+    )
     args = parser.parse_args()
 
     frame = pd.read_parquet(args.feature_table)
+    test_cells = None
+    if args.test_split:
+        test_frame = pd.read_parquet(args.test_split)
+        test_cells = sorted(test_frame['cell_id'].astype(str).unique())
     result = evaluate_leave_one_cell_out(
         frame,
         thresholds=args.thresholds,
         observation_fractions=args.fractions,
         use_ai=args.use_ai,
         weights_dir=args.weights_dir,
+        test_cells=test_cells,
+        exclude_all_test_cells_from_reference=bool(args.test_split),
     )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
