@@ -149,6 +149,26 @@ class TestSodiumLifetime(unittest.TestCase):
         self.assertGreater(stressed['stress']['history_rate_multiplier'], 1.0)
         self.assertLess(stressed['uncertainty']['confidence_score'], 0.8)
 
+    def test_rul_ai_is_gated_above_98_percent_soh(self):
+        predictor = SodiumLifetimePredictor(_reference_frame(), use_ai=False)
+        predictor._ai_rate = lambda history, scenario: 0.001
+        history = [
+            {'cycle_index': cycle, 'soh': 1.0 - 0.0002 * cycle}
+            for cycle in range(1, 33)
+        ]
+
+        early = predictor.predict(0.99, 32, 0.80, history=history)
+        later = predictor.predict(0.97, 32, 0.80, history=history)
+
+        self.assertFalse(any(
+            source['source'] == 'xgboost_128_cycle'
+            for source in early['rate_sources']
+        ))
+        self.assertTrue(any(
+            source['source'] == 'xgboost_128_cycle'
+            for source in later['rate_sources']
+        ))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -16,6 +16,7 @@ from .config import ACTUAL_FEATURE_COLUMNS
 
 DEFAULT_EOL_THRESHOLDS = (0.90, 0.85, 0.80)
 MODEL_VALIDATED_HORIZON = 128
+RUL_AI_MAX_SOH = 0.98
 
 
 def _as_float(value: Any, default: float) -> float:
@@ -497,6 +498,7 @@ class SodiumLifetimePredictor:
             'ai_artifact_available': bool(self.weights_dir),
             'ai_loaded': self._ai_model is not None and self._ai_load_error is None,
             'validated_prediction_horizon_cycles': MODEL_VALIDATED_HORIZON,
+            'rul_ai_activation_rule': f'current_soh <= {RUL_AI_MAX_SOH:.2f}',
             'one_step_test_metrics': metrics,
             'load_error': self._ai_load_error,
         }
@@ -574,7 +576,10 @@ class SodiumLifetimePredictor:
         cohort_rates, cohort_weights, nearest = self._cohort_rates(normalized_scenario)
         cohort_rate = _weighted_quantile(cohort_rates, cohort_weights, 0.50)
         history_rate = self._history_rate(normalized_history)
-        ai_rate = self._ai_rate(normalized_history, normalized_scenario)
+        ai_rate = (
+            self._ai_rate(normalized_history, normalized_scenario)
+            if current_soh <= RUL_AI_MAX_SOH else None
+        )
         physical_stress_multiplier = float(np.clip(stress['combined'], 0.25, 4.0))
 
         sources = [('rwth_cohort', cohort_rate, 0.60)]
@@ -631,6 +636,8 @@ class SodiumLifetimePredictor:
             warnings.append('输入工况超出 RWTH 训练域，不能视为同规格电芯的标定结果')
         if len(normalized_history) < 8:
             warnings.append('历史循环少于 8 个点，本次未启用 XGBoost 短期趋势校准')
+        elif current_soh > RUL_AI_MAX_SOH:
+            warnings.append('当前 SOH 高于 98%，按验证集门禁不启用 AI 远期 RUL 融合')
         if self.weights_dir is None:
             warnings.append('未找到钠电 XGBoost 权重，本次使用删失感知队列基线')
         if rul_cycles > MODEL_VALIDATED_HORIZON:
