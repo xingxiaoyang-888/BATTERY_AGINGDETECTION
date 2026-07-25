@@ -62,6 +62,11 @@ Wenzhou series battery degradation datasets (April_2026)/Wenzhou Sodium-ion Batt
 Wenzhou series battery degradation datasets (April_2026)/Wenzhou Randomized Battery Data/
 Wenzhou series battery degradation datasets (April_2026)/Wenzhou Pack Degradation Data/
 
+# 公开钠电原始数据与服务器训练产物
+data/raw/
+models/data/processed/sodium_ion/
+models/weights/sodium_ion/
+
 # ==========================================
 # 5. 操作系统与 IDE 缓存
 # ==========================================

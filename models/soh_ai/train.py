@@ -146,7 +146,25 @@ def run_training(args: argparse.Namespace) -> int:
     logger.info("  阶段 A: 数据加载")
     logger.info("=" * 70)
 
-    if args.synthetic:
+    is_transfer = getattr(args, 'transfer', False)
+    processed = None
+
+    if args.processed_dir:
+        if args.synthetic or is_transfer:
+            logger.error("--processed-dir 不能与 --synthetic 或 --transfer 同时使用")
+            return 2
+        from models.soh_ai.data_pipeline import SOHDataPipeline
+        logger.info(f"  直接读取已处理训练输入: {args.processed_dir}")
+        try:
+            processed = SOHDataPipeline().load_processed(
+                processed_dir=args.processed_dir,
+                scaler_path=args.scaler_path,
+            )
+        except Exception as e:
+            logger.error(f"  已处理训练输入加载失败: {e}", exc_info=args.verbose)
+            return 3
+        cells = []
+    elif args.synthetic:
         logger.info("  使用合成数据模式 (--synthetic)")
         from models.soh_ai.data_pipeline import (
             SOHDataPipeline, create_synthetic_test_data
@@ -157,54 +175,85 @@ def run_training(args: argparse.Namespace) -> int:
             seed=args.seed,
         )
     else:
-        from utils.download_wenzhou_data import check_data_integrity
-        integrity = check_data_integrity()
-        if not integrity['can_proceed']:
-            logger.error("  真实数据不可用! 请先下载数据集:")
-            logger.error("    python utils/download_wenzhou_data.py --method manual")
-            logger.error("  或使用合成数据: --synthetic")
-            return 2
+        if is_transfer:
+            from utils.soh_data_loader import WenzhouDataLoader
+            loader = WenzhouDataLoader()
+            # 迁移学习模式: 分离加载源域 (Li-ion) 和目标域 (Na-ion)
+            logger.info("  迁移学习模式: 分离源域/目标域数据")
+            source_cells = []
+            target_cells = []
 
-        logger.info(f"  真实数据完整性: {integrity}")
-        from utils.soh_data_loader import WenzhouDataLoader
-        loader = WenzhouDataLoader()
-        all_cells = []
-        for ds in ["sodium-ion", "cold-curse"]:
+            # 源域: 锂离子电池 (冷诅咒 + 随机工况)
+            for ds in ["cold-curse", "randomized"]:
+                try:
+                    cells = loader.load_dataset(ds)
+                    logger.info(f"  ✓ [源域] {ds}: {len(cells)} 个电芯")
+                    source_cells.extend(cells)
+                except Exception as e:
+                    logger.warning(f"  ✗ [源域] {ds}: {e}")
+
+            # 目标域: 钠离子电池
             try:
-                cells = loader.load_dataset(ds)
-                logger.info(f"  ✓ {ds}: {len(cells)} 个电芯")
-                all_cells.extend(cells)
+                target_cells = loader.load_dataset("sodium-ion")
+                logger.info(f"  ✓ [目标域] sodium-ion: {len(target_cells)} 个电芯")
             except Exception as e:
-                logger.warning(f"  ✗ {ds}: {e}")
+                logger.warning(f"  ✗ [目标域] sodium-ion: {e}")
 
-        if not all_cells:
-            logger.error("  未能加载任何电芯数据!")
-            return 2
-        cells = all_cells
+            if not target_cells:
+                logger.error("  目标域 (sodium-ion) 无可用数据! 迁移学习需要至少 1 个目标域电芯。")
+                return 2
 
-    logger.info(f"  总计 {len(cells)} 个电芯用于训练")
+            logger.info(f"  源域: {len(source_cells)} 电芯 | 目标域: {len(target_cells)} 电芯")
+            # 合并传给管线，管线的 chemistry_aware 模式会自动隔离
+            cells = source_cells + target_cells
+        else:
+            from utils.sodium_dataset_loader import SodiumDatasetLoader
+            datasets = getattr(args, 'datasets', None)
+            logger.info(f"  纯钠电模式，数据源: {datasets}")
+            cells = SodiumDatasetLoader().load_all(include=datasets)
+            if not cells:
+                logger.error("  未加载到钠电数据，请先准备 Wenzhou H 系列或 Mendeley NFM。")
+                return 2
+
+    if processed is None:
+        logger.info(f"  总计 {len(cells)} 个电芯用于训练")
 
     # ── 3. 数据管线 ──
     logger.info("\n" + "=" * 70)
     logger.info("  阶段 B: 数据管线处理")
     logger.info("=" * 70)
 
-    from models.soh_ai.data_pipeline import SOHDataPipeline
-    pipeline = SOHDataPipeline()
-    try:
-        processed = pipeline.run(cells, save=True)
-    except Exception as e:
-        logger.error(f"  数据管线失败: {e}", exc_info=args.verbose)
-        return 3
+    if processed is None:
+        from models.soh_ai.data_pipeline import SOHDataPipeline
+        pipeline = SOHDataPipeline()
+        try:
+            processed = pipeline.run(
+                cells, save=True,
+                chemistry_aware=is_transfer,
+                target_chemistry="sodium-ion",
+            )
+        except Exception as e:
+            logger.error(f"  数据管线失败: {e}", exc_info=args.verbose)
+            return 3
+    else:
+        logger.info("  已处理输入通过恢复校验，跳过原始数据解析与特征重算")
 
     # 打印数据摘要
     logger.info(f"  特征表: {processed['feature_df'].shape}")
+    logger.info(f"  跨化学体系: {processed.get('is_cross_chemistry', False)}")
     for name, (X, y) in processed['sequences'].items():
         logger.info(f"  {name}: X{X.shape}, y{y.shape}")
+    if processed.get('pretrain_sequences'):
+        for name, (X, y) in processed['pretrain_sequences'].items():
+            logger.info(f"  source_{name}: X{X.shape}, y{y.shape}")
 
     # ── 4. 模型训练 ──
     logger.info("\n" + "=" * 70)
     logger.info("  阶段 C: 模型训练")
+    if is_transfer and processed.get('is_cross_chemistry'):
+        logger.info("  模式: 迁移学习 (源域预训练 → 目标域微调)")
+    else:
+        logger.info("  模式: 标准训练")
     logger.info("=" * 70)
 
     from models.soh_ai.trainer import (
@@ -230,7 +279,12 @@ def run_training(args: argparse.Namespace) -> int:
         epoch_overrides['lstm_batch'] = args.batch_size
         epoch_overrides['transformer_batch'] = args.batch_size
 
-    if args.kfold is not None:
+    # KFold 在迁移学习模式下禁用（数据划分已由 chemistry 感知管线控制）
+    if args.kfold is not None and (is_transfer and processed.get('is_cross_chemistry')):
+        logger.warning("  ⚠️ 迁移学习模式下 KFold 不可用（数据划分已由化学体系感知管线控制），"
+                       "忽略 --kfold 参数")
+
+    if args.kfold is not None and not (is_transfer and processed.get('is_cross_chemistry')):
         from models.soh_ai.trainer import CrossValidator
         cv = CrossValidator(n_folds=args.kfold, random_state=args.seed)
         logger.info(f"  启动 cell-level KFold: kfold={args.kfold}")
@@ -274,20 +328,33 @@ def run_training(args: argparse.Namespace) -> int:
             output_dir.mkdir(parents=True, exist_ok=True)
             kfold_path = output_dir / f'kfold_results_{args.kfold}.json'
             with open(kfold_path, 'w', encoding='utf-8') as f:
-                json.dump({'fold_scores': fold_scores, 'summary': summary}, f, indent=2, ensure_ascii=False)
+                from models.soh_ai.trainer import _json_default
+                json.dump(
+                    {'fold_scores': fold_scores, 'summary': summary}, f,
+                    indent=2, ensure_ascii=False, default=_json_default,
+                )
             logger.info(f"  KFold 结果已保存: {kfold_path}")
         return 0
 
     ensemble_trainer = EnsembleTrainer()
 
     try:
-        results = ensemble_trainer.train_all(
-            processed,
-            epochs=epoch_overrides if epoch_overrides else None,
-            skip_xgb=skip_xgb,
-            skip_lstm=skip_lstm,
-            skip_transformer=skip_transformer,
-        )
+        if is_transfer and processed.get('is_cross_chemistry'):
+            results = ensemble_trainer.train_transfer(
+                processed,
+                epochs=epoch_overrides if epoch_overrides else None,
+                skip_xgb=skip_xgb,
+                skip_lstm=skip_lstm,
+                skip_transformer=skip_transformer,
+            )
+        else:
+            results = ensemble_trainer.train_all(
+                processed,
+                epochs=epoch_overrides if epoch_overrides else None,
+                skip_xgb=skip_xgb,
+                skip_lstm=skip_lstm,
+                skip_transformer=skip_transformer,
+            )
     except Exception as e:
         logger.error(f"  训练失败: {e}", exc_info=args.verbose)
         return 4
@@ -306,6 +373,7 @@ def run_training(args: argparse.Namespace) -> int:
         'arguments': vars(args),
         'models_trained': results['available_models'],
         'test_results': results.get('test_results', {}),
+        'ensemble_weights': results.get('ensemble_weights', {}),
     }
     config_path = Path(output_dir) / 'run_config.json'
     with open(config_path, 'w') as f:
@@ -355,6 +423,17 @@ def build_parser() -> argparse.ArgumentParser:
     data = parser.add_argument_group('数据')
     data.add_argument('--synthetic', action='store_true',
                      help='使用合成数据（无真实数据时自动启用）')
+    data.add_argument('--transfer', action='store_true',
+                     help='启用迁移学习模式：锂电(源域)预训练 → 钠电(目标域)微调。'
+                          '自动分离 cold-curse/randomized → sodium-ion')
+    data.add_argument('--datasets', nargs='+',
+                     choices=['wenzhou', 'mendeley-nfm', 'rwth'],
+                     default=['wenzhou', 'mendeley-nfm'],
+                     help='纯钠电模式使用的数据源（RWTH 完成字段核验后再启用）')
+    data.add_argument('--processed-dir', type=str, default=None,
+                     help='直接读取已审计的 feature_table/train/val/test Parquet 目录')
+    data.add_argument('--scaler-path', type=str, default=None,
+                     help='与已处理数据配套的 soh_scalers.pkl 路径')
     data.add_argument('--syn-cells', type=int, default=8,
                      help='合成电芯数量 (默认: 8)')
     data.add_argument('--syn-cycles', type=int, default=500,

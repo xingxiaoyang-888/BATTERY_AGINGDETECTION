@@ -605,7 +605,7 @@ class ModelEvaluator:
             return float(np.asarray(pred).reshape(-1)[-1])
 
         if model.__class__.__name__ == 'XGBoostWrapper':
-            pred = model.predict(self._build_xgb_features(seq))
+            pred = model.predict(self._build_xgb_features(seq[None, ...]))
             return float(np.asarray(pred).reshape(-1)[-1])
 
         if isinstance(model, torch.nn.Module):
@@ -715,6 +715,28 @@ class ModelEvaluator:
         if 'coulombic_efficiency' in feature_index:
             next_step[0, feature_index['coulombic_efficiency']] = float(np.clip(next_step[0, feature_index['coulombic_efficiency']], rollout_cfg.min_coulombic_efficiency, 1.0))
 
+        # 滚动后同步更新 SOH 派生特征，防止后续步骤继续读取旧差分。
+        extended = np.concatenate([seq, next_step], axis=0)
+        soh_values = extended[:, feature_index['soh']]
+        for name, lag in [('soh_diff_1', 1), ('soh_diff_3', 3), ('soh_diff_5', 5)]:
+            if name in feature_index and len(soh_values) > lag:
+                next_step[0, feature_index[name]] = float(soh_values[-1] - soh_values[-1 - lag])
+        if 'soh_decay_rate' in feature_index:
+            recent_soh = np.clip(soh_values[-11:], 1e-6, None)
+            if len(recent_soh) >= 3:
+                slope = np.polyfit(np.arange(len(recent_soh)), np.log(recent_soh), 1)[0]
+                next_step[0, feature_index['soh_decay_rate']] = float(max(-slope, 0.0))
+        if 'capacity_fade_acceleration' in feature_index and len(soh_values) >= 5:
+            current_diff = soh_values[-1] - soh_values[-2]
+            lagged_diff = soh_values[-4] - soh_values[-5]
+            next_step[0, feature_index['capacity_fade_acceleration']] = float(current_diff - lagged_diff)
+        if 'ce_trend' in feature_index and 'coulombic_efficiency' in feature_index:
+            ce_values = np.concatenate([
+                seq[:, feature_index['coulombic_efficiency']],
+                next_step[:, feature_index['coulombic_efficiency']],
+            ])
+            next_step[0, feature_index['ce_trend']] = float(np.mean(ce_values[-5:]))
+
         return np.concatenate([seq[1:], next_step], axis=0)
 
     def rollout_sequence(self,
@@ -733,14 +755,17 @@ class ModelEvaluator:
         preds = []
         cfg = rollout_cfg or CovariateRolloutConfig()
         scenario = self._load_rollout_scenario(scenario_data, steps).as_step_arrays(steps)
+        from models.soh_ai.config import ACTUAL_FEATURE_COLUMNS
+        soh_index = ACTUAL_FEATURE_COLUMNS.index('soh')
 
         for step_idx in range(steps):
             model_input = current.copy()
             if x_scaler is not None:
-                model_input[:, 1:] = x_scaler.transform(current[:, 1:])
+                scale_indices = [idx for idx in range(current.shape[1]) if idx != soh_index]
+                model_input[:, scale_indices] = x_scaler.transform(current[:, scale_indices])
             pred_value = self._predict_next_soh(model, model_input, mask=mask)
             current = self._apply_covariate_strategy(current, step_idx, pred_value, cfg, scenario)
-            preds.append(float(current[-1, 0]))
+            preds.append(float(current[-1, soh_index]))
             if mask is not None:
                 mask = np.concatenate([mask[1:], np.ones_like(mask[:1])], axis=0)
 
@@ -765,7 +790,11 @@ class ModelEvaluator:
                      cell_id: str = "") -> np.ndarray:
         """??????????????? 32 ??"""
         if isinstance(window_data, pd.DataFrame):
-            window = window_data.to_numpy(dtype=np.float32)
+            from models.soh_ai.config import ACTUAL_FEATURE_COLUMNS
+            missing = [column for column in ACTUAL_FEATURE_COLUMNS if column not in window_data.columns]
+            if missing:
+                raise ValueError(f'window_data 缺少模型特征列: {missing}')
+            window = window_data[ACTUAL_FEATURE_COLUMNS].to_numpy(dtype=np.float32)
         elif isinstance(window_data, np.ndarray):
             window = np.asarray(window_data, dtype=np.float32)
         else:
@@ -839,8 +868,10 @@ class ModelEvaluator:
 
         if isinstance(window_data, np.ndarray):
             arr = np.asarray(window_data, dtype=np.float32)
+            from models.soh_ai.config import ACTUAL_FEATURE_COLUMNS
+            soh_index = ACTUAL_FEATURE_COLUMNS.index('soh')
             context['history_cycle_indices'] = np.arange(1, arr.shape[0] + 1)
-            context['history_soh'] = arr[:, 0] if arr.shape[1] > 0 else None
+            context['history_soh'] = arr[:, soh_index] if arr.shape[1] > soh_index else None
             return context
 
         path_obj = Path(window_data)
@@ -884,10 +915,10 @@ class ModelEvaluator:
         return context
 
     @staticmethod
-    def _load_scaler() -> Optional[object]:
+    def _load_scaler(weights_dir: Optional[Union[str, Path]] = None) -> Optional[object]:
         """?? X ???????????"""
         from models.soh_ai.config import WEIGHTS_DIR
-        scaler_path = Path(WEIGHTS_DIR) / 'soh_scalers.pkl'
+        scaler_path = Path(weights_dir or WEIGHTS_DIR) / 'soh_scalers.pkl'
         if scaler_path.exists():
             import joblib
             scalers = joblib.load(scaler_path)
@@ -902,11 +933,13 @@ class ModelEvaluator:
                            rollout_cfg: CovariateRolloutConfig = None,
                            scenario_data=None,
                            history_cycles: int = 200,
-                           cell_id: str = "") -> Dict[str, any]:
+                           cell_id: str = "",
+                           x_scaler=None,
+                           create_plot: bool = True) -> Dict[str, any]:
         """SOH ???????"""
         context = self._load_history_context(window_data, history_cycles=history_cycles, cell_id=cell_id)
         X_window = self._load_window(window_data, history_cycles=history_cycles, cell_id=cell_id)
-        x_scaler = self._load_scaler()  # 始终用 scaler，数据已保证是原始物理值
+        x_scaler = x_scaler if x_scaler is not None else self._load_scaler()
         scenario_payload = rollout_cfg.scenario if rollout_cfg and rollout_cfg.scenario is not None else scenario_data
         future_pred = self.rollout_sequence(
             ensemble_or_model,
@@ -919,7 +952,9 @@ class ModelEvaluator:
         )
         future_pred = np.asarray(future_pred, dtype=np.float32).reshape(-1)
 
-        start_soh = float(X_window[-1, 0]) if X_window.shape[1] > 0 else float('nan')
+        from models.soh_ai.config import ACTUAL_FEATURE_COLUMNS
+        soh_index = ACTUAL_FEATURE_COLUMNS.index('soh')
+        start_soh = float(X_window[-1, soh_index]) if X_window.shape[1] > soh_index else float('nan')
         result = {
             'window_shape': tuple(X_window.shape),
             'future_steps': int(future_steps),
@@ -931,7 +966,7 @@ class ModelEvaluator:
             'resolved_cell_id': context['resolved_cell_id'],
         }
 
-        if context['history_cycle_indices'] is not None and context['history_soh'] is not None:
+        if create_plot and context['history_cycle_indices'] is not None and context['history_soh'] is not None:
             fig = self.vis.plot_trajectory(
                 cycle_indices=np.asarray(context['history_cycle_indices']),
                 true_soh=np.asarray(context['history_soh']),
@@ -981,6 +1016,7 @@ class ModelEvaluator:
                      scenario_data=None,
                      history_cycles: int = 200,
                      cell_id: str = '',
+                     create_plot: bool = True,
                      ) -> Dict[str, any]:
         """
         ?????????????????
@@ -1035,6 +1071,16 @@ class ModelEvaluator:
             m.eval()
             ensemble.register('transformer', m)
 
+        ensemble_weights_path = weights_dir / 'ensemble_weights.json'
+        if ensemble_weights_path.exists():
+            with open(ensemble_weights_path, 'r', encoding='utf-8') as fh:
+                weights = json.load(fh)
+            ensemble.set_weights(
+                xgb=weights.get('xgb', 0.0),
+                lstm=weights.get('lstm', 0.0),
+                transformer=weights.get('transformer', 0.0),
+            )
+
         if test_data is not None:
             X_test, y_test = test_data
             return evaluator.evaluate_all(ensemble, X_test, y_test)
@@ -1048,6 +1094,8 @@ class ModelEvaluator:
                 scenario_data=scenario_payload,
                 history_cycles=history_cycles,
                 cell_id=cell_id,
+                x_scaler=evaluator._load_scaler(weights_dir),
+                create_plot=create_plot,
             )
 
         logger.warning("  ??????????????")

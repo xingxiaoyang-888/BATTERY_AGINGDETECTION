@@ -25,6 +25,24 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
+
+def _duration_to_hours(value: Any) -> float:
+    """将 Excel 的时长、timedelta 或 h:mm:ss 文本统一为小时。"""
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return 0.0
+    if isinstance(value, pd.Timedelta):
+        return value.total_seconds() / 3600.0
+    if hasattr(value, 'total_seconds'):
+        return float(value.total_seconds()) / 3600.0
+    if isinstance(value, (int, float, np.number)):
+        # Excel 时间以天为单位；大于 2 的数更可能已经是秒。
+        numeric = float(value)
+        return numeric * 24.0 if 0 <= numeric <= 2 else numeric / 3600.0
+    try:
+        return pd.to_timedelta(str(value)).total_seconds() / 3600.0
+    except (TypeError, ValueError):
+        return 0.0
+
 # ============================================================
 # 数据结构定义
 # ============================================================
@@ -84,13 +102,17 @@ class CellDegradationData:
 
     @property
     def soh_series(self) -> np.ndarray:
-        """计算 SOH 序列（基于全部循环中的最大放电容量作为 BOL 参考）"""
+        """计算 SOH 序列，使用初始循环容量作为 BOL 参考。
+
+        参考容量只取前 10 个有效循环的最大值，避免全生命周期最大值把未来信息
+        泄漏到早期训练样本。后续若出现异常增容，由数据审计负责标记。
+        """
         if not self.cycles:
             return np.array([])
-        # 取全生命周期最大放电容量作为标称容量 (BOL)
         valid_caps = [c.discharge_capacity_ah for c in self.cycles
                       if c.discharge_capacity_ah > 0]
-        ref_cap = max(valid_caps) if valid_caps else 1.0
+        initial_caps = valid_caps[:10]
+        ref_cap = max(initial_caps) if initial_caps else 1.0
         return np.array([c.discharge_capacity_ah / ref_cap for c in self.cycles])
 
 
@@ -315,11 +337,16 @@ class XLSFileLoader:
             'charge_capacity_ah': [r'charge.*cap', r'充电.*容', r'cha.*cap', r'cap.*cha'],
             'discharge_capacity_ah': [r'discharge.*cap', r'放电.*容', r'dis.*cap', r'cap.*dis'],
             'coulombic_efficiency': [r'coulomb', r'库仑', r'efficiency', r'效率', r'ce'],
+            'charge_energy_wh':     [r'charge.*energy', r'充电能量'],
+            'discharge_energy_wh':  [r'discharge.*energy', r'放电能量'],
             'temperature_c':      [r'temp', r'温度', r'temperature'],
             'voltage_mean':       [r'voltage.*mean', r'平均.*压', r'v_mean'],
             'current_a':          [r'current', r'电流', r'i_'],
-            'time_s':             [r'time', r'时间', r'duration'],
-            'dc_resistance':      [r'resistance', r'内阻', r'dcr', r'ir'],
+            'charge_time':        [r'charge.*time', r'充电时间'],
+            'discharge_time':     [r'discharge.*time', r'放电时间'],
+            'dc_resistance':      [r'discharge.*dc.*resistance', r'放电直流内阻',
+                                   r'dc.*resistance', r'内阻', r'dcr'],
+            'mean_voltage_v':     [r'median.*voltage', r'中值电压', r'voltage.*mean'],
         }
 
         mapping = {}
@@ -329,6 +356,12 @@ class XLSFileLoader:
                     if std_name not in mapping:  # 优先第一个匹配
                         mapping[std_name] = orig_col
                     break
+
+        # 内阻字段优先使用放电直流内阻，避免误选交流内阻或充电首循环异常值。
+        for orig_col, clean_col in clean_cols.items():
+            if re.search(r'discharge.*dc.*resistance|放电直流内阻', clean_col):
+                mapping['dc_resistance'] = orig_col
+                break
 
         logger.info(f"  列结构检测: {len(mapping)}/{len(match_rules)} 个字段已识别")
         return mapping
@@ -705,16 +738,49 @@ class WenzhouDataLoader:
     def _excel_dict_to_cycle(self, d: dict, idx: int) -> Optional[CycleData]:
         """将 Excel 行字典转为 CycleData"""
         try:
+            charge_capacity = float(d.get('charge_capacity_ah', 0) or 0)
+            discharge_capacity = float(d.get('discharge_capacity_ah', 0) or 0)
+
+            # H 系表头写 mAh/mWh，但数值量级与约 1.2 Ah 商业电芯一致，
+            # 直接按 Ah/Wh 使用；否则会得到不合理的 1 mAh 电芯。
+
+            ce = float(d.get('coulombic_efficiency', 0) or 0)
+            if ce > 1.5:
+                ce /= 100.0
+
+            charge_hours = _duration_to_hours(d.get('charge_time'))
+            discharge_hours = _duration_to_hours(d.get('discharge_time'))
+            c_rate_charge = (1.0 / charge_hours) if charge_hours > 0 else 0.0
+            c_rate_discharge = (1.0 / discharge_hours) if discharge_hours > 0 else 0.0
+
+            resistance = d.get('dc_resistance')
+            if resistance is not None and not pd.isna(resistance):
+                resistance = float(resistance)
+                # H 系导出值与典型电芯内阻量级一致时按 mOhm 解释。
+                resistance = resistance / 1000.0 if resistance > 1.0 else resistance
+            else:
+                resistance = None
+
+            temperature = float(d.get('temperature_c', 25.0) or 0)
+            if temperature == 0:
+                temperature = 25.0
+
+            mean_voltage = float(d.get('mean_voltage_v', 0) or 0)
             return CycleData(
                 cycle_index=d.get('cycle_index', idx + 1),
-                charge_capacity_ah=float(d.get('charge_capacity_ah', 0)),
-                discharge_capacity_ah=float(d.get('discharge_capacity_ah', 0)),
-                coulombic_efficiency=float(d.get('coulombic_efficiency', 0)),
-                temperature_c=float(d.get('temperature_c', 25.0)),
-                c_rate_charge=float(d.get('c_rate_charge', 0)),
-                c_rate_discharge=float(d.get('c_rate_discharge', 0)),
-                dc_resistance_ohm=float(d.get('dc_resistance', np.nan))
-                    if d.get('dc_resistance') is not None else None,
+                charge_capacity_ah=charge_capacity,
+                discharge_capacity_ah=discharge_capacity,
+                coulombic_efficiency=min(max(ce, 0.0), 1.2),
+                charge_energy_wh=float(d.get('charge_energy_wh', 0) or 0),
+                discharge_energy_wh=float(d.get('discharge_energy_wh', 0) or 0),
+                mean_charge_voltage_v=mean_voltage,
+                mean_discharge_voltage_v=mean_voltage,
+                temperature_c=temperature,
+                temp_max_c=temperature,
+                temp_min_c=temperature,
+                c_rate_charge=c_rate_charge,
+                c_rate_discharge=c_rate_discharge,
+                dc_resistance_ohm=resistance,
                 metadata={k: v for k, v in d.items()
                           if k not in ['cycle_index', 'charge_capacity_ah',
                                        'discharge_capacity_ah', 'coulombic_efficiency',

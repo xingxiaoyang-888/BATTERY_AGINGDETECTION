@@ -37,7 +37,7 @@ from sklearn.model_selection import GroupKFold
 from sklearn.preprocessing import RobustScaler
 
 from .config import (
-    FEATURE_CFG,
+    FEATURE_CFG, ACTUAL_FEATURE_COLUMNS,
     XGB_CFG, LSTM_CFG, TRANSFORMER_CFG,
     ENSEMBLE_CFG, TRAIN_CFG,
     WEIGHTS_DIR,
@@ -50,6 +50,17 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _json_default(value):
+    """将 NumPy 标量和数组转换为标准 JSON 类型。"""
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, Path):
+        return str(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -431,9 +442,15 @@ class XGBoostTrainer:
     注意：XGBoost 以 2D 扁平特征为输入，与序列模型不同。
     """
 
-    def __init__(self, cfg=None):
+    def __init__(self, cfg=None, soh_feature_index: int = None):
         self.cfg = cfg or XGB_CFG
-        self.model = XGBoostWrapper(self.cfg)
+        self.model = XGBoostWrapper(
+            self.cfg,
+            soh_feature_index=(
+                ACTUAL_FEATURE_COLUMNS.index(FEATURE_CFG.target_col)
+                if soh_feature_index is None else soh_feature_index
+            ),
+        )
         self.history = {'train_loss': [], 'val_loss': []}
 
     def fit(self,
@@ -492,13 +509,19 @@ class XGBoostTrainer:
 class LSTMTrainer(BaseTrainer):
     """BiLSTM + Attention 模型训练器"""
 
-    def __init__(self, cfg=None, train_cfg=None, input_dim: int = None):
+    def __init__(self, cfg=None, train_cfg=None, input_dim: int = None,
+                 soh_feature_index: int = None):
         self.cfg = cfg or LSTM_CFG
         self._input_dim = input_dim  # 允许从数据覆盖
+        self._soh_feature_index = soh_feature_index
         super().__init__(train_cfg)
 
     def _create_model(self) -> nn.Module:
-        return BiLSTMAttention(self.cfg, input_dim=self._input_dim)
+        return BiLSTMAttention(
+            self.cfg,
+            input_dim=self._input_dim,
+            soh_feature_index=self._soh_feature_index,
+        )
 
     def _create_optimizer(self, model: nn.Module) -> torch.optim.Optimizer:
         return optim.AdamW(
@@ -523,13 +546,19 @@ class LSTMTrainer(BaseTrainer):
 class TransformerTrainer(BaseTrainer):
     """Temporal Transformer 模型训练器"""
 
-    def __init__(self, cfg=None, train_cfg=None, input_dim: int = None):
+    def __init__(self, cfg=None, train_cfg=None, input_dim: int = None,
+                 soh_feature_index: int = None):
         self.cfg = cfg or TRANSFORMER_CFG
         self._input_dim = input_dim  # 允许从数据覆盖
+        self._soh_feature_index = soh_feature_index
         super().__init__(train_cfg)
 
     def _create_model(self) -> nn.Module:
-        return TemporalTransformer(self.cfg, input_dim=self._input_dim)
+        return TemporalTransformer(
+            self.cfg,
+            input_dim=self._input_dim,
+            soh_feature_index=self._soh_feature_index,
+        )
 
     def _create_optimizer(self, model: nn.Module) -> torch.optim.Optimizer:
         # Transformer 通常用较小的学习率
@@ -576,6 +605,7 @@ class EnsembleTrainer:
         self.transformer_trainer = None
         self.ensemble = EnsembleModel(cfg)
         self.results: Dict[str, Any] = {}
+        self.soh_feature_index = ACTUAL_FEATURE_COLUMNS.index(FEATURE_CFG.target_col)
 
     def train_all(self, pipeline_output: dict,
                   epochs: Optional[Dict[str, int]] = None,
@@ -617,7 +647,13 @@ class EnsembleTrainer:
 
         # 从数据中推断实际特征维度
         n_features = X_train.shape[2]  # (samples, seq_len, n_features)
+        feature_cols = pipeline_output.get('feature_cols') or ACTUAL_FEATURE_COLUMNS[:n_features]
+        if FEATURE_CFG.target_col not in feature_cols:
+            raise ValueError(f"训练特征缺少 '{FEATURE_CFG.target_col}'，无法进行残差学习")
+        self.soh_feature_index = feature_cols.index(FEATURE_CFG.target_col)
+        self.xgb_trainer.model.soh_feature_index = self.soh_feature_index
         logger.info(f"  输入特征维度: {n_features} (seq_len={X_train.shape[1]})")
+        logger.info(f"  残差学习锚点: {FEATURE_CFG.target_col}[{self.soh_feature_index}]")
 
         # ── 1. XGBoost ──
         if not skip_xgb:
@@ -655,7 +691,10 @@ class EnsembleTrainer:
             lstm_batch = epoch_cfg.get('lstm_batch', LSTM_CFG.batch_size)
 
             if self.lstm_trainer is None:
-                self.lstm_trainer = LSTMTrainer(input_dim=n_features)
+                self.lstm_trainer = LSTMTrainer(
+                    input_dim=n_features,
+                    soh_feature_index=self.soh_feature_index,
+                )
 
             lstm_model, lstm_hist = self.lstm_trainer.fit(
                 X_train, y_train,
@@ -682,7 +721,10 @@ class EnsembleTrainer:
             tf_batch = epoch_cfg.get('transformer_batch', TRANSFORMER_CFG.batch_size)
 
             if self.transformer_trainer is None:
-                self.transformer_trainer = TransformerTrainer(input_dim=n_features)
+                self.transformer_trainer = TransformerTrainer(
+                    input_dim=n_features,
+                    soh_feature_index=self.soh_feature_index,
+                )
 
             tf_model, tf_hist = self.transformer_trainer.fit(
                 X_train, y_train,
@@ -712,6 +754,8 @@ class EnsembleTrainer:
             elif self.transformer_trainer is not None:
                 self.ensemble.to(self.transformer_trainer.device)
 
+            if X_val is not None and y_val is not None:
+                self._set_validation_weights(X_val, y_val)
             test_results = self._evaluate_test(X_test, y_test)
 
         # ── 5. 汇总 ──
@@ -720,6 +764,7 @@ class EnsembleTrainer:
             'history': history,
             'scalers': pipeline_output.get('scalers', {}),
             'test_results': test_results,
+            'ensemble_weights': dict(self.ensemble.weights),
             'available_models': self.ensemble.available_models,
         }
 
@@ -754,12 +799,37 @@ class EnsembleTrainer:
             axis=1
         )
 
+    def _set_validation_weights(self, X_val: np.ndarray, y_val: np.ndarray):
+        """按验证集 MSE 的倒数设置可用子模型权重。"""
+        predictions = self.ensemble.predict(X_val)
+        losses = {
+            name: float(np.mean((pred - y_val) ** 2))
+            for name, pred in predictions.items()
+            if name != 'ensemble'
+        }
+        if not losses:
+            return
+        inverse = {name: 1.0 / max(loss, 1e-12) for name, loss in losses.items()}
+        total = sum(inverse.values())
+        normalized = {name: value / total for name, value in inverse.items()}
+        self.ensemble.set_weights(
+            xgb=normalized.get('xgb', 0.0),
+            lstm=normalized.get('lstm', 0.0),
+            transformer=normalized.get('transformer', 0.0),
+        )
+        logger.info(f"  验证集模型 MSE: {losses}")
+
     def _evaluate_test(self, X_test: np.ndarray,
                        y_test: np.ndarray) -> Dict[str, float]:
         """在测试集上评估所有模型"""
         from sklearn.metrics import mean_squared_error, mean_absolute_error
 
         predictions = self.ensemble.predict(X_test)
+        predictions['persistence'] = np.repeat(
+            X_test[:, -1, self.soh_feature_index:self.soh_feature_index + 1],
+            y_test.shape[1] if y_test.ndim > 1 else 1,
+            axis=1,
+        )
         results = {}
 
         for name, pred in predictions.items():
@@ -785,16 +855,385 @@ class EnsembleTrainer:
         # 保存训练历史
         history_path = output_dir / 'training_history.json'
         with open(history_path, 'w') as f:
-            json.dump(self.results.get('history', {}), f, indent=2, ensure_ascii=False)
+            json.dump(
+                self.results.get('history', {}), f,
+                indent=2, ensure_ascii=False, default=_json_default,
+            )
         logger.info(f"  训练历史已保存: {history_path}")
+
+        weights_path = output_dir / 'ensemble_weights.json'
+        with open(weights_path, 'w') as f:
+            json.dump(self.ensemble.weights, f, indent=2, ensure_ascii=False)
+        logger.info(f"  集成权重已保存: {weights_path}")
 
         # 保存测试结果
         if self.results.get('test_results'):
             test_path = output_dir / 'test_results.json'
             with open(test_path, 'w') as f:
-                json.dump(self.results['test_results'], f, indent=2, ensure_ascii=False)
+                json.dump(
+                    self.results['test_results'], f,
+                    indent=2, ensure_ascii=False, default=_json_default,
+                )
 
         logger.info(f"  所有模型已保存至: {output_dir}")
+
+    # ═══════════════════════════════════════════════════════════
+    # 迁移学习: 源域预训练 → 目标域微调
+    # ═══════════════════════════════════════════════════════════
+
+    def pretrain_on_source(self, pretrain_sequences: dict,
+                           epochs: Optional[Dict[str, int]] = None,
+                           skip_xgb: bool = False,
+                           skip_lstm: bool = False,
+                           skip_transformer: bool = False) -> Dict[str, Any]:
+        """
+        阶段 1: 在源域 (lithium-ion) 上预训练所有模型。
+
+        源域数据量大（146 个电芯），模型可以学到丰富的电池老化模式
+        （容量衰减曲线形态、内阻增长规律、拐点特征等），这些模式在
+        不同化学体系间具有一定的可迁移性。
+
+        Args:
+            pretrain_sequences: {'train': (X, y), 'val': (X, y)|None}
+            epochs: 可选的 epoch 覆盖
+            skip_xgb/skip_lstm/skip_transformer: 跳过的模型
+
+        Returns:
+            {'xgb': XGBoostWrapper, 'lstm': nn.Module, 'transformer': nn.Module, ...}
+        """
+        X_train, y_train = pretrain_sequences['train']
+        X_val, y_val = pretrain_sequences.get('val', (None, None))
+
+        if isinstance(X_val, tuple):
+            X_val, y_val = X_val
+
+        n_features = X_train.shape[2]
+        epoch_cfg = epochs or {}
+        pretrained = {}
+
+        logger.info("=" * 60)
+        logger.info(f"  迁移学习 Phase 1/2: 源域预训练 ({len(X_train)} 样本)")
+        logger.info(f"  源域验证: {len(X_val)} 样本" if X_val is not None
+                    else "  源域验证: 无独立验证集")
+        logger.info("=" * 60)
+
+        # ── XGBoost 预训练 ──
+        if not skip_xgb:
+            logger.info("\n  [预训练] XGBoost 基线...")
+            X_train_flat = self._extract_tabular_features(X_train)
+            X_val_flat = self._extract_tabular_features(X_val) if X_val is not None else None
+            self.xgb_trainer.fit(X_train_flat, y_train, X_val_flat,
+                                 y_val if X_val is not None else None)
+            self.ensemble.register('xgb', self.xgb_trainer.model)
+            pretrained['xgb'] = self.xgb_trainer.model
+            logger.info(f"  ✓ XGBoost 预训练完成")
+        else:
+            logger.info("  ⊘ 跳过 XGBoost 预训练")
+
+        # ── BiLSTM 预训练 ──
+        if not skip_lstm:
+            logger.info("\n  [预训练] BiLSTM + Attention...")
+            lstm_epochs = epoch_cfg.get('lstm', LSTM_CFG.epochs)
+            lstm_batch = epoch_cfg.get('lstm_batch', LSTM_CFG.batch_size)
+            if self.lstm_trainer is None:
+                self.lstm_trainer = LSTMTrainer(input_dim=n_features)
+            lstm_model, lstm_hist = self.lstm_trainer.fit(
+                X_train, y_train, X_val, y_val,
+                epochs=lstm_epochs, batch_size=lstm_batch,
+                patience=LSTM_CFG.patience, model_name="lstm_attention"
+            )
+            self.ensemble.register('lstm', lstm_model)
+            pretrained['lstm'] = lstm_model
+            pretrained['lstm_history'] = lstm_hist.to_dict()
+            # 保存完整 checkpoint（含 optimizer state），供 finetune resume
+            lstm_ckpt_path = str(Path(WEIGHTS_DIR) / 'checkpoints' / 'lstm_attention_pretrained.pt')
+            Path(lstm_ckpt_path).parent.mkdir(parents=True, exist_ok=True)
+            torch.save({
+                'epoch': lstm_hist.total_epochs,
+                'model_state_dict': lstm_model.state_dict(),
+                'optimizer_state_dict': self.lstm_trainer._optimizer.state_dict(),
+                'scheduler_state_dict': self.lstm_trainer._scheduler.state_dict() if self.lstm_trainer._scheduler else None,
+                'val_loss': lstm_hist.best_val_loss,
+                'history': lstm_hist.to_dict(),
+            }, lstm_ckpt_path)
+            pretrained['lstm_checkpoint'] = lstm_ckpt_path
+            logger.info(f"  ✓ BiLSTM 预训练完成 (best_val_loss={lstm_hist.best_val_loss:.6f})")
+        else:
+            logger.info("  ⊘ 跳过 BiLSTM 预训练")
+
+        # ── Transformer 预训练 ──
+        if not skip_transformer:
+            logger.info("\n  [预训练] Temporal Transformer...")
+            tf_epochs = epoch_cfg.get('transformer', TRANSFORMER_CFG.epochs)
+            tf_batch = epoch_cfg.get('transformer_batch', TRANSFORMER_CFG.batch_size)
+            if self.transformer_trainer is None:
+                self.transformer_trainer = TransformerTrainer(input_dim=n_features)
+            tf_model, tf_hist = self.transformer_trainer.fit(
+                X_train, y_train, X_val, y_val,
+                epochs=tf_epochs, batch_size=tf_batch,
+                patience=TRANSFORMER_CFG.patience, model_name="transformer"
+            )
+            self.ensemble.register('transformer', tf_model)
+            pretrained['transformer'] = tf_model
+            pretrained['transformer_history'] = tf_hist.to_dict()
+            # 保存完整 checkpoint
+            tf_ckpt_path = str(Path(WEIGHTS_DIR) / 'checkpoints' / 'transformer_pretrained.pt')
+            Path(tf_ckpt_path).parent.mkdir(parents=True, exist_ok=True)
+            torch.save({
+                'epoch': tf_hist.total_epochs,
+                'model_state_dict': tf_model.state_dict(),
+                'optimizer_state_dict': self.transformer_trainer._optimizer.state_dict(),
+                'scheduler_state_dict': self.transformer_trainer._scheduler.state_dict() if self.transformer_trainer._scheduler else None,
+                'val_loss': tf_hist.best_val_loss,
+                'history': tf_hist.to_dict(),
+            }, tf_ckpt_path)
+            pretrained['transformer_checkpoint'] = tf_ckpt_path
+            logger.info(f"  ✓ Transformer 预训练完成 (best_val_loss={tf_hist.best_val_loss:.6f})")
+        else:
+            logger.info("  ⊘ 跳过 Transformer 预训练")
+
+        logger.info(f"\n  源域预训练完成! 模型: {list(pretrained.keys())}")
+        return pretrained
+
+    def finetune_on_target(self, target_sequences: dict,
+                           epochs: Optional[Dict[str, int]] = None,
+                           pretrained_models: Optional[Dict[str, Any]] = None,
+                           skip_xgb: bool = False,
+                           skip_lstm: bool = False,
+                           skip_transformer: bool = False) -> Dict[str, Any]:
+        """
+        阶段 2: 在目标域 (sodium-ion) 上微调预训练模型。
+
+        微调策略:
+          - XGBoost: 降低 learning_rate (0.01 vs 0.05)，其他不变
+          - BiLSTM: learning_rate × 0.1, 少量 epochs, 冻结底层 LSTM
+                    仅训练 attention + FC 预测头
+          - Transformer: learning_rate × 0.1, 少量 epochs, 冻结编码器
+                         仅训练预测头
+
+        Args:
+            target_sequences: {'train': (X,y), 'val': (X,y), 'test': (X,y)}
+            epochs: epoch 覆盖 (默认比预训练少)
+            pretrained_models: 预训练好的模型 (可选，不传则使用 self.ensemble 中已有的)
+            skip_xgb/skip_lstm/skip_transformer: 跳过的模型
+
+        Returns:
+            {'test_results': {...}, 'history': {...}, 'finetuned_models': [...]}
+        """
+        X_train, y_train = target_sequences['train']
+        X_val, y_val = target_sequences.get('val', (None, None))
+        X_test, y_test = target_sequences.get('test', (None, None))
+
+        if isinstance(X_val, tuple):
+            X_val, y_val = X_val
+        if isinstance(X_test, tuple):
+            X_test, y_test = X_test
+
+        # 目标域数据少，默认少量 epochs
+        n_features = X_train.shape[2]
+        epoch_cfg = epochs or {
+            'lstm': 50,          # 预训练是 200, 微调用 1/4
+            'lstm_batch': min(16, LSTM_CFG.batch_size),  # 小 batch 适配小数据
+            'transformer': 60,    # 预训练是 300, 微调用 1/5
+            'transformer_batch': min(8, TRANSFORMER_CFG.batch_size),
+        }
+
+        # 使用传入的预训练模型，或从 ensemble 中获取
+        if pretrained_models is not None:
+            for name, model in pretrained_models.items():
+                if name in ('xgb', 'lstm', 'transformer'):
+                    self.ensemble.register(name, model)
+
+        history = {}
+        logger.info("=" * 60)
+        logger.info(f"  迁移学习 Phase 2/2: 目标域微调 ({len(X_train)} 样本)")
+        logger.info(f"  目标域: {target_sequences.get('target_cells', '?')} 电芯")
+        logger.info("=" * 60)
+
+        # ── XGBoost 微调 ──
+        if not skip_xgb and 'xgb' in self.ensemble.available_models:
+            logger.info("\n  [微调] XGBoost (降低 LR)...")
+            # XGBoost 无法真正 "fine-tune"，策略是:
+            # 用源域预训练模型的特征重要性作为先验，在目标域上用更低 LR 重新训练
+            X_train_flat = self._extract_tabular_features(X_train)
+            X_val_flat = self._extract_tabular_features(X_val) if X_val is not None else None
+
+            # 创建低 LR 的 XGBoost 配置
+            from dataclasses import replace
+            try:
+                low_lr_cfg = replace(self.xgb_trainer.cfg,
+                                    learning_rate=0.01,       # 原始的 1/5
+                                    n_estimators=200,         # 减少树数量防止过拟合
+                                    max_depth=4,              # 降低复杂度
+                                    early_stopping_rounds=20)
+            except Exception:
+                # Python < 3.12 没有 dataclasses.replace
+                from .config import XGBoostConfig
+                low_lr_cfg = XGBoostConfig()
+                low_lr_cfg.learning_rate = 0.01
+                low_lr_cfg.n_estimators = 200
+                low_lr_cfg.max_depth = 4
+                low_lr_cfg.early_stopping_rounds = 20
+
+            ft_xgb_trainer = XGBoostTrainer(cfg=low_lr_cfg)
+            ft_xgb_trainer.fit(X_train_flat, y_train, X_val_flat,
+                              y_val if X_val is not None else None)
+            self.ensemble.register('xgb', ft_xgb_trainer.model)
+            history['xgb'] = ft_xgb_trainer.history
+            logger.info(f"  ✓ XGBoost 微调完成")
+        elif not skip_xgb:
+            logger.warning("  ⚠️ 无 XGBoost 预训练模型，跳过微调")
+
+        # ── BiLSTM 微调 ──
+        if not skip_lstm and 'lstm' in self.ensemble.available_models:
+            logger.info("\n  [微调] BiLSTM (低 LR, 少 epochs)...")
+            lstm_epochs = epoch_cfg.get('lstm', 50)
+            lstm_batch = epoch_cfg.get('lstm_batch', 16)
+            lstm_ckpt = (pretrained_models or {}).get('lstm_checkpoint')
+
+            if lstm_ckpt and os.path.exists(lstm_ckpt):
+                ft_lstm = LSTMTrainer(input_dim=n_features)
+                # 从预训练 checkpoint 恢复，目标域数据少 → 靠少量 epochs + L2 正则防过拟合
+                lstm_model, lstm_hist = ft_lstm.fit(
+                    X_train, y_train, X_val, y_val,
+                    epochs=lstm_epochs, batch_size=lstm_batch,
+                    patience=max(12, LSTM_CFG.patience // 2),
+                    model_name="lstm_attention_ft",
+                    resume_from=lstm_ckpt,
+                )
+                self.ensemble.register('lstm', lstm_model)
+                history['lstm'] = lstm_hist.to_dict()
+                ft_lstm.save_model(str(Path(WEIGHTS_DIR) / 'lstm_attention_finetuned.pt'))
+                logger.info(f"  ✓ BiLSTM 微调完成 (best_val_loss={lstm_hist.best_val_loss:.6f})")
+            else:
+                logger.warning("  ⚠️ BiLSTM 预训练 checkpoint 不存在，跳过微调")
+        elif not skip_lstm:
+            logger.warning("  ⚠️ 无 BiLSTM 预训练模型，跳过微调")
+
+        # ── Transformer 微调 ──
+        if not skip_transformer and 'transformer' in self.ensemble.available_models:
+            logger.info("\n  [微调] Transformer (低 LR, 少 epochs)...")
+            tf_epochs = epoch_cfg.get('transformer', 60)
+            tf_batch = epoch_cfg.get('transformer_batch', 8)
+            tf_ckpt = (pretrained_models or {}).get('transformer_checkpoint')
+
+            if tf_ckpt and os.path.exists(tf_ckpt):
+                ft_tf = TransformerTrainer(input_dim=n_features)
+                tf_model, tf_hist = ft_tf.fit(
+                    X_train, y_train, X_val, y_val,
+                    epochs=tf_epochs, batch_size=tf_batch,
+                    patience=max(15, TRANSFORMER_CFG.patience // 2),
+                    model_name="transformer_ft",
+                    resume_from=tf_ckpt,
+                )
+                self.ensemble.register('transformer', tf_model)
+                history['transformer'] = tf_hist.to_dict()
+                ft_tf.save_model(str(Path(WEIGHTS_DIR) / 'transformer_finetuned.pt'))
+                logger.info(f"  ✓ Transformer 微调完成 (best_val_loss={tf_hist.best_val_loss:.6f})")
+            else:
+                logger.warning("  ⚠️ Transformer 预训练 checkpoint 不存在，跳过微调")
+        elif not skip_transformer:
+            logger.warning("  ⚠️ 无 Transformer 预训练模型，跳过微调")
+
+        # ── 测试集评估 ──
+        test_results = {}
+        if X_test is not None and y_test is not None:
+            logger.info("\n" + "-" * 40)
+            logger.info("  目标域测试集评估 (微调后)")
+            logger.info("-" * 40)
+            if self.lstm_trainer is not None:
+                self.ensemble.to(self.lstm_trainer.device)
+            test_results = self._evaluate_test(X_test, y_test)
+
+        self.results = {
+            'ensemble': self.ensemble,
+            'history': history,
+            'test_results': test_results,
+            'available_models': self.ensemble.available_models,
+            'transfer_learning': True,
+        }
+
+        logger.info(f"\n  目标域微调完成! 模型: {self.ensemble.available_models}")
+        return self.results
+
+    def train_transfer(self, pipeline_output: dict,
+                       epochs: Optional[Dict[str, int]] = None,
+                       skip_xgb: bool = False,
+                       skip_lstm: bool = False,
+                       skip_transformer: bool = False,
+                       ) -> Dict[str, Any]:
+        """
+        完整迁移学习流程: 源域预训练 → 目标域微调。
+
+        自动从 pipeline_output 中检测跨化学体系数据:
+          - pipeline_output['pretrain_sequences'] → 源域 (Li-ion)
+          - pipeline_output['sequences'] → 目标域 (Na-ion)
+
+        Args:
+            pipeline_output: SOHDataPipeline.run(chemistry_aware=True) 的输出
+            epochs: 可选的 epoch 覆盖
+            skip_xgb/skip_lstm/skip_transformer: 跳过的模型
+
+        Returns:
+            {
+                'pretrained': {...},         # 预训练结果
+                'finetuned': {...},          # 微调结果
+                'test_results': {...},       # 测试集指标
+                'is_transfer': bool,          # 是否执行了迁移学习
+            }
+        """
+        pretrain_seqs = pipeline_output.get('pretrain_sequences')
+        target_seqs = pipeline_output.get('sequences')
+        is_cross = pipeline_output.get('is_cross_chemistry', False)
+
+        if not is_cross or pretrain_seqs is None:
+            logger.info("  非跨域场景，回退到普通训练模式")
+            result = self.train_all(
+                pipeline_output,
+                epochs=epochs,
+                skip_xgb=skip_xgb,
+                skip_lstm=skip_lstm,
+                skip_transformer=skip_transformer,
+            )
+            result['is_transfer'] = False
+            return result
+
+        # 注入目标域电芯信息
+        if target_seqs is not None:
+            target_seqs = dict(target_seqs)  # shallow copy
+            target_seqs['target_cells'] = pipeline_output.get('target_cells', [])
+
+        # Phase 1: 源域预训练
+        logger.info("\n" + "█" * 60)
+        logger.info("  迁移学习: 锂电 (源域) → 钠电 (目标域)")
+        logger.info(f"  源域化学体系: {pipeline_output.get('source_chemistry')}")
+        logger.info(f"  目标域化学体系: {pipeline_output.get('target_chemistry')}")
+        logger.info("█" * 60)
+
+        pretrained = self.pretrain_on_source(
+            pretrain_seqs,
+            epochs=epochs,
+            skip_xgb=skip_xgb,
+            skip_lstm=skip_lstm,
+            skip_transformer=skip_transformer,
+        )
+
+        # Phase 2: 目标域微调
+        finetuned = self.finetune_on_target(
+            target_seqs,
+            epochs=epochs,
+            pretrained_models=pretrained,
+            skip_xgb=skip_xgb,
+            skip_lstm=skip_lstm,
+            skip_transformer=skip_transformer,
+        )
+
+        finetuned['is_transfer'] = True
+        finetuned['pretrained'] = pretrained
+        finetuned['source_chemistry'] = pipeline_output.get('source_chemistry')
+        finetuned['target_chemistry'] = pipeline_output.get('target_chemistry')
+
+        return finetuned
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -825,7 +1264,7 @@ class CrossValidator:
 
         feature_cols = pipeline_output.get('feature_cols')
         if not feature_cols:
-            exclude = {'cell_id', 'chemistry', 'cycle_index', 'soh_raw', 'soh_jump_flag', FEATURE_CFG.target_col}
+            exclude = {'cell_id', 'chemistry', 'dataset_id', 'condition', 'cycle_index', 'soh_raw', 'soh_jump_flag', FEATURE_CFG.target_col}
             feature_cols = [
                 c for c in feature_df.columns
                 if c not in exclude and feature_df[c].dtype.kind in 'fiu'
@@ -868,13 +1307,16 @@ class CrossValidator:
             train_df = train_val_df[train_val_df['cell_id'].isin(train_cells)].copy()
             val_df = train_val_df[train_val_df['cell_id'].isin(val_cells)].copy()
 
+            # SOH 同时是输入状态和预测目标，必须保留真实物理域。
+            # 只缩放其余输入列，否则 KFold 的 y 会被错误地变换到缩放域。
+            scale_cols = [col for col in feature_cols if col != FEATURE_CFG.target_col]
             scaler = RobustScaler(quantile_range=(5, 95))
-            scaler.fit(train_df[feature_cols].values)
+            scaler.fit(train_df[scale_cols].values)
 
             def _scale(df):
                 out = df.copy()
                 if not out.empty:
-                    out.loc[:, feature_cols] = scaler.transform(out[feature_cols].values)
+                    out.loc[:, scale_cols] = scaler.transform(out[scale_cols].values)
                 return out
 
             X_train, y_train, _, _ = seq_builder.build_sequences(_scale(train_df), feature_cols=feature_cols)

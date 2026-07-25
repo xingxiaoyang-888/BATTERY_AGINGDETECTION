@@ -18,11 +18,12 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 # 数据集原始目录（Wenzhou 系列）
 RAW_DATA_DIR = os.path.join(BASE_DIR, "Wenzhou series battery degradation datasets (April_2026)")
 
-# 已提取/处理的中间数据目录
-PROCESSED_DATA_DIR = os.path.join(BASE_DIR, "models", "data", "processed")
+# 公开钠电原始数据目录（不提交 Git）
+SODIUM_RAW_DATA_DIR = os.path.join(BASE_DIR, "data", "raw", "sodium_ion")
 
-# 模型权重保存目录
-WEIGHTS_DIR = os.path.join(BASE_DIR, "models", "weights")
+# 钠电处理产物与模型独立存放，避免覆盖历史锂电实验
+PROCESSED_DATA_DIR = os.path.join(BASE_DIR, "models", "data", "processed", "sodium_ion")
+WEIGHTS_DIR = os.path.join(BASE_DIR, "models", "weights", "sodium_ion")
 
 # ============================================================
 # 2. 数据集结构描述
@@ -138,12 +139,8 @@ class FeatureConfig:
 
     @property
     def n_features(self) -> int:
-        """输入特征总数。
-
-        训练管线当前稳定产出 11 维特征，直接返回真实维度，避免
-        “概念特征集”与实际输入列数漂移。
-        """
-        return 11
+        """默认组合数据集实际使用的输入特征数。"""
+        return len(ACTUAL_FEATURE_COLUMNS)
 
 
 # 全局特征配置实例
@@ -151,9 +148,9 @@ FEATURE_CFG = FeatureConfig()
 
 # 当前训练管线稳定使用的实际输入特征列
 ACTUAL_FEATURE_COLUMNS = [
+    "nominal_capacity_ah",
     "soh",
     "cumulative_ah_throughput",
-    "internal_resistance",
     "coulombic_efficiency",
     "temperature_c",
     "c_rate_charge",
@@ -162,6 +159,15 @@ ACTUAL_FEATURE_COLUMNS = [
     "soc_min",
     "soc_max",
     "soc_mean",
+    "mean_charge_voltage",
+    "mean_discharge_voltage",
+    "voltage_hysteresis",
+    "soh_diff_1",
+    "soh_diff_3",
+    "soh_diff_5",
+    "soh_decay_rate",
+    "capacity_fade_acceleration",
+    "ce_trend",
 ]
 
 # ============================================================

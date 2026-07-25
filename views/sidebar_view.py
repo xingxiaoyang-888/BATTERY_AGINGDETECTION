@@ -1,203 +1,159 @@
-# views/sidebar_view.py
-import streamlit as st
+"""仿真工作区侧边栏。"""
+
 import os
+
 import requests
-import json
+import streamlit as st
 
-API_BASE = "http://localhost:8000"
+API_BASE = os.getenv("BATTERY_API_BASE", "http://localhost:8000")
 
 
-@st.cache_data(ttl=60)
-def fetch_fmu_configs():
-    """从后端获取可用的 FMU 规格列表（缓存60秒）"""
+@st.cache_data(ttl=30, show_spinner=False)
+def fetch_backend_state():
+    state = {"online": False, "health": None, "fmus": None}
     try:
-        resp = requests.get(f"{API_BASE}/api/v1/fmu/configurations", timeout=3)
-        if resp.status_code == 200:
-            return resp.json()
-    except Exception:
+        health = requests.get(f"{API_BASE}/api/v1/health", timeout=2.5)
+        configs = requests.get(f"{API_BASE}/api/v1/fmu/configurations", timeout=3)
+        if health.ok:
+            state["online"] = True
+            state["health"] = health.json()
+        if configs.ok:
+            state["fmus"] = configs.json()
+    except requests.RequestException:
         pass
-    return None
+    return state
 
 
-def render_sidebar():
-    """
-    渲染侧边栏并返回配置字典
-    包含：电池规格（级联Ns/Np选择）、工况配置、环境参数、初始状态
-    """
-    config = {}
-
-    # ── 获取可用 FMU 配置 ──
-    fmu_data = fetch_fmu_configs()
-
+def render_sidebar(show_simulation_controls=True):
+    backend = fetch_backend_state()
+    config = {"backend_online": backend["online"]}
     with st.sidebar:
-        st.markdown("### ⚙️ 仿真参数配置")
-        st.caption("Simulation Configuration")
-        st.markdown("---")
-
-        # === 1. 电池包规格（级联选择 Ns → Np）===
-        st.markdown("#### 1. 电池包规格 (Pack)")
-
-        if fmu_data is None:
-            # 后端未启动时的降级方案
-            st.warning("⚠️ 后端未连接，使用本地默认配置")
-            c1, c2 = st.columns(2)
-            with c1:
-                config['series_num'] = st.number_input("串联数 (Ns)", value=8, step=1, min_value=1)
-            with c2:
-                config['parallel_num'] = st.number_input("并联数 (Np)", value=2, step=1, min_value=1)
-            cell_cap = st.number_input("单体容量 (Ah)", value=50.0, step=0.5, format="%.1f")
-        else:
-            # ── 正常模式：从 API 获取选项 ──
-            configs = fmu_data['configurations']
-            default_ns = fmu_data.get('default_ns', 8)
-            default_np = fmu_data.get('default_np', 2)
-
-            # 构建 Ns 选项列表
-            ns_options = [c['ns'] for c in configs]
-            # 找到默认 Ns 的索引
-            try:
-                ns_default_idx = ns_options.index(default_ns)
-            except ValueError:
-                ns_default_idx = 0
-
-            selected_ns = st.selectbox(
-                "串联数 Ns（串联组数）",
-                options=ns_options,
-                index=ns_default_idx,
-                format_func=lambda x: f"{x}s  ({x * 3.1:.0f}V 额定)",
-                help="选择电池包串联组数。不同规格对应不同电压平台和应用场景。"
-            )
-
-            # 根据选中的 Ns 过滤可用的 Np
-            np_details = []
-            for c in configs:
-                if c['ns'] == selected_ns:
-                    np_details = c['np_options']
-                    break
-
-            # 构建 Np 选项（显示是否有 FMU）
-            np_values = [d['np'] for d in np_details]
-            np_labels = {}
-            try:
-                np_default_idx = np_values.index(default_np)
-            except ValueError:
-                np_default_idx = 0
-
-            # 判断当前选中 Np 是否在可用列表中
-            np_to_use = np_values[np_default_idx] if np_values else 1
-
-            selected_np = st.selectbox(
-                "并联数 Np（每组并联单体数）",
-                options=np_values,
-                index=np_default_idx,
-                format_func=lambda x: _format_np_label(x, np_details, np_values),
-                help="绿色 ✓ = FMU 已就绪可仿真；灰色 ⏳ = 仅有 .mo 模型，需先导出 FMU"
-            )
-
-            config['series_num'] = selected_ns
-            config['parallel_num'] = selected_np
-
-            # 规格信息
-            for d in np_details:
-                if d['np'] == selected_np:
-                    cells = d['total_cells']
-                    voltage = d['nominal_voltage']
-                    has_fmu = d['has_fmu']
-                    break
-            else:
-                cells = selected_ns * selected_np
-                voltage = round(selected_ns * 3.1, 1)
-                has_fmu = False
-
-            cell_cap = st.number_input("单体容量 (Ah)", value=50.0, step=0.5, format="%.1f",
-                                       help="钠离子电芯典型容量 50Ah")
-
-            # 实时规格展示
-            total_energy = voltage * selected_np * cell_cap / 1000.0
-            fmu_status = "✅ FMU就绪" if has_fmu else "⏳ 需导出FMU"
-            st.info(
-                f"📦 {selected_ns}s{selected_np}p | {cells}电芯 | ~{voltage}V | ~{total_energy:.1f}kWh\n\n"
-                f"FMU状态: {fmu_status}"
-            )
-
-            config['cell_capacity'] = cell_cap
-
-        # === 2. 运行工况 (Profile) ===
-        st.markdown("#### 2. 运行工况 (Profile)")
-        profile_mode = st.radio("工况来源", ["⚡ 恒流模式 (CC)", "📂 导入 CSV 文件"], horizontal=True)
-        config['profile_mode'] = profile_mode
-
-        if "CSV" in profile_mode:
-            config['uploaded_file'] = st.file_uploader("上传工况 (Time, Current)", type=['csv'])
-
-            template_path = os.path.join("assets", "templates", "cycle_profile.csv")
-            if os.path.exists(template_path):
-                with open(template_path, "rb") as f:
-                    st.download_button(
-                        label="📥 下载 CSV 模板",
-                        data=f,
-                        file_name="cycle_template.csv",
-                        mime="text/csv",
-                        help="下载标准格式模板，填入数据后上传。"
-                    )
-            else:
-                st.caption("⚠️ 模板文件未找到 (assets/templates/cycle_profile.csv)")
-
-            if config.get('uploaded_file'):
-                st.success(f"✅ 已加载: {config['uploaded_file'].name}")
-            else:
-                st.caption("⚠️ 未上传，将使用默认空载演示")
-
-            config['sim_duration'] = 1200
-            config['pack_current'] = 0.0
-        else:
-            c3, c4 = st.columns(2)
-            with c3:
-                config['pack_current'] = st.number_input("总线电流 (A)", value=50.0, step=10.0,
-                                                         help="正值=放电，负值=充电")
-            with c4:
-                config['sim_duration'] = st.number_input("时长 (s)", value=600, step=60)
-            config['uploaded_file'] = None
-
-        # === 3. 环境边界 (Env) ===
-        st.markdown("#### 3. 环境边界 (Env)")
-        config['env_temp'] = st.slider("环境温度 (°C)", -30, 60, 25)
-        config['cooling_type'] = st.selectbox(
-            "热管理系统 (TMS)",
-            ["Natural", "Air Cooling", "Liquid Cooling", "Liquid Heating", "Immersion"]
+        st.markdown(
+            """
+            <div class="sidebar-brand">
+                <div class="sidebar-logo">Na</div>
+                <div><strong>SODIUM TWIN</strong><small>OPERATIONS CONSOLE</small></div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        status_class = "online" if backend["online"] else "standby"
+        status_text = "BACKEND ONLINE" if backend["online"] else "BACKEND OFFLINE"
+        st.markdown(
+            f'<div class="sidebar-status"><i class="status-dot {status_class}"></i>{status_text}'
+            f'<span>{API_BASE.replace("http://", "")}</span></div>',
+            unsafe_allow_html=True,
         )
 
-        # === 4. 初始状态 ===
-        st.markdown("#### 4. 初始状态")
-        c5, c6 = st.columns(2)
-        with c5:
-            config['init_soc'] = st.number_input("Init SOC (%)", 0.0, 100.0, 80.0,
-                                                 help="钠离子电池初始荷电状态")
-        with c6:
-            config['init_soh'] = st.number_input("Init SOH (%)", 50.0, 100.0, 100.0)
+        if show_simulation_controls:
+            _render_simulation_controls(config, backend.get("fmus"))
+        else:
+            st.markdown(
+                """
+                <div class="sidebar-context">
+                    <div class="section-eyebrow">WORKSPACE MODE</div>
+                    <h4>数据分析工作区</h4>
+                    <p>当前页面使用独立寿命与证据接口，不需要先运行FMU。</p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-        # === 预留：故障注入（默认无故障） ===
-        config['fault_mode'] = 1
-        config['fault_s_index'] = 1
-        config['fault_p_index'] = 1
-        config['fault_severity'] = 0.0
-
-        st.markdown("---")
-        config['run_btn'] = st.button("🚀 启动仿真 (START)", type="primary", use_container_width=True)
-
-        if st.button("⬅️ 退出登录"):
-            st.session_state['logged_in'] = False
-            st.rerun()
-
+        st.markdown('<div class="sidebar-user-label">CURRENT OPERATOR</div>', unsafe_allow_html=True)
+        user_col, exit_col = st.columns([1.35, .65], vertical_alignment="center")
+        with user_col:
+            st.markdown(f"**{st.session_state.get('username', 'Guest')}**")
+        with exit_col:
+            if st.button("退出", use_container_width=True, key="sidebar_logout"):
+                st.session_state["logged_in"] = False
+                st.session_state.pop("sim_result", None)
+                st.rerun()
     return config
 
 
-def _format_np_label(np_val: int, np_details: list, np_values: list) -> str:
-    """格式化 Np 选项标签：显示是否有 FMU"""
-    for d in np_details:
-        if d['np'] == np_val:
-            cells = d['total_cells']
-            has_fmu = d['has_fmu']
-            status = "✅" if has_fmu else "⏳"
-            return f"{np_val}p  ({cells}电芯)  {status}"
-    return f"{np_val}p"
+def _render_simulation_controls(config, fmu_data):
+    st.markdown('<div class="sidebar-section-title">SIMULATION SETUP</div>', unsafe_allow_html=True)
+
+    with st.expander("01 · 电池包与电芯", expanded=True):
+        if fmu_data and fmu_data.get("configurations"):
+            configs = fmu_data["configurations"]
+            ns_options = [item["ns"] for item in configs]
+            default_ns = fmu_data.get("default_ns", ns_options[0])
+            ns = st.selectbox(
+                "串联数量 Ns",
+                ns_options,
+                index=ns_options.index(default_ns) if default_ns in ns_options else 0,
+                format_func=lambda value: f"{value}s · 约 {value * 3.1:.0f} V",
+            )
+            details = next(item["np_options"] for item in configs if item["ns"] == ns)
+            ready = [item for item in details if item.get("has_fmu")]
+            np_options = [item["np"] for item in (ready or details)]
+            np_value = st.selectbox(
+                "并联数量 Np",
+                np_options,
+                format_func=lambda value: _np_label(value, details),
+            )
+            has_fmu = any(item["np"] == np_value and item.get("has_fmu") for item in details)
+        else:
+            c1, c2 = st.columns(2)
+            ns = c1.number_input("Ns", min_value=1, value=8, step=1)
+            np_value = c2.number_input("Np", min_value=1, value=2, step=1)
+            has_fmu = False
+        capacity = st.number_input("单体额定容量 / Ah", min_value=.1, max_value=2000., value=50., step=.5)
+        config.update(series_num=int(ns), parallel_num=int(np_value), cell_capacity=float(capacity))
+        cells = int(ns) * int(np_value)
+        state = "FMU READY" if has_fmu else "LOCAL FALLBACK"
+        st.caption(f"{cells} CELLS · {int(ns)}S{int(np_value)}P · {state}")
+
+    with st.expander("02 · 运行工况", expanded=True):
+        profile_mode = st.radio("工况来源", ["恒流工况", "CSV 时变工况"], horizontal=True)
+        config["profile_mode"] = profile_mode
+        if profile_mode == "CSV 时变工况":
+            config["uploaded_file"] = st.file_uploader("上传 Time / Current CSV", type=["csv"])
+            template_path = os.path.join("assets", "templates", "cycle_profile.csv")
+            if os.path.exists(template_path):
+                with open(template_path, "rb") as file:
+                    st.download_button("下载工况模板", file, "cycle_profile.csv", "text/csv", use_container_width=True)
+            config["pack_current"] = 0.0
+            config["sim_duration"] = 1200.0
+        else:
+            config["uploaded_file"] = None
+            c1, c2 = st.columns(2)
+            config["pack_current"] = c1.number_input("总线电流 / A", value=50., step=10.)
+            config["sim_duration"] = c2.number_input("仿真时长 / s", min_value=10, value=600, step=60)
+
+    with st.expander("03 · 热管理边界", expanded=False):
+        config["env_temp"] = st.slider("环境温度 / °C", -30, 60, 25)
+        c1, c2 = st.columns(2)
+        config["initial_cell_temp"] = c1.number_input("初始电芯温度", -30., 90., float(config["env_temp"]))
+        config["coolant_inlet_temp"] = c2.number_input("冷却液入口温度", -30., 80., float(config["env_temp"]))
+        config["coolant_flow_kg_s"] = st.number_input("冷却液质量流量 / kg·s⁻¹", .001, 2., .035, step=.005, format="%.3f")
+        config["cooling_ua_w_per_k"] = st.number_input("等效换热系数 UA / W·K⁻¹", .1, 100., 2., step=.5)
+
+    with st.expander("04 · 初始状态与故障", expanded=False):
+        c1, c2 = st.columns(2)
+        config["init_soc"] = c1.number_input("初始 SOC / %", 0., 100., 80.)
+        config["init_soh"] = c2.number_input("初始 SOH / %", 50., 100., 100.)
+        enable_fault = st.toggle("启用故障注入", value=False)
+        if enable_fault:
+            config["fault_mode"] = st.selectbox("故障模式", [2, 3, 4, 5, 6], format_func=lambda x: f"MODE {x}")
+            c3, c4 = st.columns(2)
+            config["fault_s_index"] = c3.number_input("串联位置", 1, int(ns), 1)
+            config["fault_p_index"] = c4.number_input("并联位置", 1, int(np_value), 1)
+            config["fault_severity"] = st.slider("故障严重度", 0., 1., .5, .05)
+        else:
+            config.update(fault_mode=1, fault_s_index=1, fault_p_index=1, fault_severity=0.)
+
+    config["run_btn"] = st.button(
+        "启动数字孪生解算",
+        type="primary",
+        use_container_width=True,
+        disabled=not bool(config.get("backend_online", True)),
+        key="run_simulation",
+    )
+
+
+def _np_label(value, details):
+    detail = next((item for item in details if item["np"] == value), {})
+    state = "READY" if detail.get("has_fmu") else "PENDING"
+    return f"{value}p · {detail.get('total_cells', '?')} cells · {state}"

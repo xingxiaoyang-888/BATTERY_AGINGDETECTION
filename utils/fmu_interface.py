@@ -39,24 +39,71 @@ def discover_available_fmus(fmu_dir: str = "fmu_models") -> List[Dict]:
     return configs
 
 
+# 标准串并联规格列表（由参数化模板 SystemForFMI.mo 覆盖）
+# 涵盖了微型储能→乘用车→商用车→电网的全部典型拓扑
+STANDARD_PACK_CONFIGS: List[Tuple[int, int]] = [
+    # 微型模组：两轮车、便携储能
+    (8, 2), (12, 2),
+    # 小型储能：户用、小型工商业
+    (16, 1), (16, 2), (16, 3), (16, 4),
+    # 中型包：乘用车 400V 平台
+    (20, 2), (24, 2), (32, 2),
+    (48, 1), (48, 2),
+    # 标准乘用车：400V 平台主力规格
+    (96, 1), (96, 2), (96, 3),
+    # 大型包：商用车、重卡
+    (100, 1), (100, 2), (108, 2),
+    # 高压平台：800V 乘用车/商用车
+    (128, 1), (128, 2), (192, 1), (192, 2),
+    # 超大型：电网储能集装箱
+    (200, 1), (216, 1), (256, 1), (288, 1), (480, 1),
+]
+
+
 def discover_available_models(models_dir: str = "mo_system_models") -> List[Dict]:
     """
     扫描 mo_system_models/ 目录，返回所有预配置的规格（含未导出 FMU 的）
+
+    兼容两种模式：
+    1. 新模板模式：检测到 SystemForFMI.mo 参数化模板 → 返回 STANDARD_PACK_CONFIGS
+    2. 旧独立文件模式：检测到 SystemForFMI_{N}x{M}.mo → 按文件名解析
     """
     configs = []
-    pattern = re.compile(r'SystemForFMI_(\d+)x(\d+)\.mo$')
     if not os.path.isdir(models_dir):
-        return []
-    for fname in sorted(os.listdir(models_dir)):
+        return configs
+
+    file_list = sorted(os.listdir(models_dir))
+
+    # 检测参数化模板
+    has_template = any(f.startswith('SystemForFMI.') and f.endswith('.mo')
+                       and not re.search(r'\d+x\d+', f) for f in file_list)
+
+    if has_template:
+        # 新模板模式：返回全部标准规格
+        logger.info(f" 检测到参数化 FMU 模板，共 {len(STANDARD_PACK_CONFIGS)} 种标准规格可用")
+        for ns, np_val in STANDARD_PACK_CONFIGS:
+            fname = f"SystemForFMI_{ns}x{np_val}.mo"
+            configs.append({
+                'ns': ns,
+                'np': np_val,
+                'filename': fname,
+                'total_cells': ns * np_val,
+                'nominal_voltage': round(ns * 3.1, 1),
+            })
+        return configs
+
+    # 兼容旧独立文件模式
+    pattern = re.compile(r'SystemForFMI_(\d+)x(\d+)\.mo$')
+    for fname in file_list:
         m = pattern.match(fname)
         if not m:
             continue
-        ns, np = int(m.group(1)), int(m.group(2))
+        ns, np_val = int(m.group(1)), int(m.group(2))
         configs.append({
             'ns': ns,
-            'np': np,
+            'np': np_val,
             'filename': fname,
-            'total_cells': ns * np,
+            'total_cells': ns * np_val,
             'nominal_voltage': round(ns * 3.1, 1),
         })
     return configs
@@ -88,6 +135,7 @@ class FMUClient:
     """
     def __init__(self, fmu_path: str):
         self.fmu_path = fmu_path
+        self._dll_directory_handles = []
         self._setup_windows_env()
 
         try:
@@ -109,7 +157,7 @@ class FMUClient:
             if os.path.exists(om_bin_path):
                 os.environ['PATH'] = om_bin_path + os.pathsep + os.environ.get('PATH', '')
                 if hasattr(os, 'add_dll_directory'):
-                    os.add_dll_directory(om_bin_path)
+                    self._dll_directory_handles.append(os.add_dll_directory(om_bin_path))
             else:
                 logger.warning(f"⚠️ 未找到 OpenModelica bin 目录，若仿真崩溃请检查 C++ 运行库。")
 
@@ -135,7 +183,11 @@ class FMUClient:
             logger.warning(f"⚠️ 维度检测失败: {e}，使用默认 8×2")
             return 8, 2
 
-    def run_simulation(self, stop_time: float, inputs: Dict[str, float]) -> Tuple[Optional[pd.DataFrame], List[List[List[float]]], List[List[List[float]]], List[List[List[float]]]]:
+    def run_simulation(self, stop_time: float,
+                       inputs: Optional[Dict[str, float]] = None,
+                       parameters: Optional[Dict[str, float]] = None,
+                       current_profile: Optional[List[Tuple[float, float]]] = None
+                       ) -> Tuple[Optional[pd.DataFrame], List[List[List[float]]], List[List[List[float]]], List[List[List[float]]]]:
         """
         执行联合仿真，自动使用 FMU 内部维度解析空间矩阵
 
@@ -144,7 +196,13 @@ class FMUClient:
         :return: (DataFrame, TCell矩阵, SOCCell矩阵, SOHCell矩阵)
         """
         Ns, Np = self.Ns, self.Np
-        logger.info(f" 启动 FMU 解算 [{Ns}s{Np}p] 时长: {stop_time}s, 输入: {inputs}")
+        inputs = dict(inputs or {})
+        parameters = dict(parameters or {})
+        logger.info(
+            " 启动 FMU 解算 [%ss%sp] 时长: %ss, 标量输入: %s, 参数覆盖: %s, 工况点: %s",
+            Ns, Np, stop_time, inputs, sorted(parameters),
+            len(current_profile) if current_profile else 0,
+        )
 
         # 1. 动态生成变量清单（温度 + SOC + SOH 三个空间矩阵）
         output_vars = ['time', 'pack.V_pack', 'pack.I_pack', 'pack.T_max', 'pack.T_min', 'pack.SOC_min', 'pack.SOH_min']
@@ -156,12 +214,20 @@ class FMUClient:
                 output_vars.append(f'pack.SOHCell[{s},{p}]')
 
         try:
+            start_values = dict(parameters)
+            input_table = None
+            if current_profile:
+                input_table = self._build_current_profile(current_profile, stop_time)
+                inputs.pop('I_load_external', None)
+            start_values.update(inputs)
+
             # 2. 调用底层 C++ 求解器
             result = fmpy.simulate_fmu(
                 filename=self.fmu_path,
                 start_time=0.0,
                 stop_time=stop_time,
-                start_values=inputs,
+                start_values=start_values,
+                input=input_table,
                 output_interval=1.0,
                 output=output_vars
             )
@@ -179,6 +245,33 @@ class FMUClient:
         except Exception as e:
             logger.error(f" FMU 仿真执行崩溃: {e}")
             return None, [], [], []
+
+    @staticmethod
+    def _build_current_profile(profile: List[Tuple[float, float]],
+                               stop_time: float) -> np.ndarray:
+        """将严格递增的电流工况点转换为 fmpy 结构化输入表。"""
+        if len(profile) < 2:
+            raise ValueError("电流工况至少需要两个时间点")
+        points = [(float(t), float(i)) for t, i in profile]
+        times = np.asarray([point[0] for point in points], dtype=float)
+        currents = np.asarray([point[1] for point in points], dtype=float)
+        if not np.isfinite(times).all() or not np.isfinite(currents).all():
+            raise ValueError("电流工况包含非有限值")
+        if times[0] < 0 or np.any(np.diff(times) <= 0):
+            raise ValueError("电流工况时间必须非负且严格递增")
+        if times[-1] > stop_time + 1e-9:
+            raise ValueError("电流工况末端时间不能超过仿真时长")
+        if times[0] > 0:
+            points.insert(0, (0.0, currents[0]))
+        if points[-1][0] < stop_time:
+            points.append((float(stop_time), points[-1][1]))
+        table = np.empty(
+            len(points),
+            dtype=[('time', np.float64), ('I_load_external', np.float64)],
+        )
+        table['time'] = [point[0] for point in points]
+        table['I_load_external'] = [point[1] for point in points]
+        return table
 
     def _extract_spatial_matrix(self, df: pd.DataFrame, Ns: int, Np: int, prefix: str) -> List[List[List[float]]]:
         """
