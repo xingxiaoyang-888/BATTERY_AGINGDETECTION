@@ -205,6 +205,8 @@ class SodiumLifetimePredictor:
         root = Path(__file__).resolve().parents[1] / 'weights' / 'sodium_ion'
         candidates = [root / 'xgb_model.pkl']
         candidates.extend(root.glob('server_artifacts_*/server_runs/*/models/xgb_model.pkl'))
+        project_root = Path(__file__).resolve().parents[2]
+        candidates.extend(project_root.glob('server_runs/*/models/xgb_model.pkl'))
         candidates = [path for path in candidates if path.is_file()]
         if not candidates:
             return None
