@@ -45,7 +45,25 @@ html, body, [class*="css"] {
 }
 
 [data-testid="stHeader"] { background: transparent; }
-[data-testid="stToolbar"], [data-testid="stDecoration"], #MainMenu { display: none !important; }
+[data-testid="stToolbar"] { display: flex !important; background: transparent !important; }
+[data-testid="stToolbarActions"],
+[data-testid="stAppDeployButton"],
+[data-testid="stMainMenu"],
+[data-testid="stDecoration"],
+#MainMenu { display: none !important; }
+[data-testid="stExpandSidebarButton"] {
+    position: fixed !important; left: 12px !important; top: 12px !important; z-index: 1000001 !important;
+    display: inline-flex !important; align-items: center !important; justify-content: center !important;
+    width: 38px !important; height: 38px !important; min-width: 38px !important; min-height: 38px !important;
+    color: #ffffff !important; border: 1px solid rgba(255,255,255,.34) !important; border-radius: 8px !important;
+    background: rgba(10, 28, 38, .98) !important; box-shadow: 0 10px 28px rgba(0,0,0,.34) !important;
+}
+[data-testid="stExpandSidebarButton"] [data-testid="stIconMaterial"] {
+    color: #ffffff !important; opacity: 1 !important;
+}
+[data-testid="stExpandSidebarButton"]:hover {
+    color: #ffffff !important; border-color: var(--cyan) !important; background: rgba(69,210,190,.24) !important;
+}
 .block-container { max-width: 1560px; padding: 1.25rem 2rem 3rem; }
 
 h1, h2, h3, h4, p { color: var(--text); }
