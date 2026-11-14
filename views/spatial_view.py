@@ -1,4 +1,4 @@
-"""电池包三维热场与健康空间诊断视图。"""
+"""Spatial view."""
 
 import math
 
@@ -36,7 +36,7 @@ SOH_SCALE = [
 
 
 def _cell_layout(ns: int, np_: int):
-    """将串并联拓扑映射到紧凑的模组化物理排布。"""
+    """Map a series/parallel topology to a compact modular display layout."""
     module_count = max(1, math.ceil(ns / SERIES_PER_MODULE))
     series_columns = min(SERIES_COLUMNS, ns)
     module_rows_of_cells = math.ceil(min(SERIES_PER_MODULE, ns) / series_columns)
@@ -282,7 +282,7 @@ def _contact_trace(cells, values, value_name, suffix, colorscale, cmin, cmax):
 
 
 def _cell_body_trace(cells, values, value_name, suffix, colorscale, cmin, cmax):
-    """为不完整支持Mesh3d的浏览器提供始终可见的电芯实体层。"""
+    """Draw visible cell bodies for browsers with limited Mesh3d support."""
     cell_count = len(cells)
     marker_size = max(7, min(26, 72 / math.sqrt(max(cell_count, 1))))
     customdata = [
@@ -292,7 +292,7 @@ def _cell_body_trace(cells, values, value_name, suffix, colorscale, cmin, cmax):
     return go.Scatter3d(
         x=[cell["x"] for cell in cells],
         y=[cell["y"] for cell in cells],
-        # 放在电芯顶面之上，避免部分WebGL实现仅写入Mesh3d深度而不绘制面片时被遮挡。
+
         z=[CELL_H + 0.08] * cell_count,
         mode="markers",
         marker=dict(
@@ -372,7 +372,7 @@ def _render_summary(items):
 
 
 def render_3d_pack_thermal_view(ts_data: TimeSeriesData, Ns: int, Np: int):
-    """渲染热场数字孪生、时间帧选择和热点定位。"""
+    """Render cell temperatures, frame selection, and hotspot locations."""
     frames = getattr(ts_data, "temp_matrix_frames", None)
     if not frames:
         st.info("当前结果没有空间热场数据，请确认所选FMU支持电芯温度矩阵输出。")
@@ -444,7 +444,7 @@ def render_3d_pack_thermal_view(ts_data: TimeSeriesData, Ns: int, Np: int):
 
 
 def render_3d_aging_map_view(soh_matrix, Ns: int, Np: int):
-    """渲染SOH空间分布并标识限制整包寿命的最差电芯。"""
+    """Render SOH spatial variation and identify the limiting cell."""
     if soh_matrix is None or len(soh_matrix) == 0:
         st.info("当前结果没有SOH空间矩阵，请确认所选FMU支持单体健康状态输出。")
         return

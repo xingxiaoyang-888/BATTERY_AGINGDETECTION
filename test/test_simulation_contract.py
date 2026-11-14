@@ -1,4 +1,4 @@
-"""仿真请求、CSV工况与电热老化数据闭环测试。"""
+"""Test simulation contract."""
 
 import io
 import unittest

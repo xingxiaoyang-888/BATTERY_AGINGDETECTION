@@ -1,4 +1,4 @@
-"""SOH 残差学习与持久性锚点测试。"""
+"""Test soh residual models."""
 
 import json
 import tempfile

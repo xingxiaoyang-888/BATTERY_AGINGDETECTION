@@ -1,0 +1,14 @@
+services:
+  sodium-twin:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - workspace:/app/data/workspace
+    environment:
+      SODIUM_DATA_DIR: /app/data/workspace
+      SODIUM_MODEL_DIR: /app/artifacts
+      SODIUM_WEB_DIR: /app/web/dist
+    restart: unless-stopped
+volumes:
+  workspace:

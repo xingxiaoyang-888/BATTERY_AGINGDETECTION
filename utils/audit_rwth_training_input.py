@@ -1,4 +1,4 @@
-"""审计 RWTH 原始循环数据与最终训练输入。"""
+"""Audit rwth training input."""
 
 from __future__ import annotations
 

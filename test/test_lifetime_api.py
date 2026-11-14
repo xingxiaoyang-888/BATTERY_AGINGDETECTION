@@ -1,4 +1,4 @@
-"""钠电寿命API的参数与单位转换测试。"""
+"""Test lifetime api."""
 
 import asyncio
 import unittest

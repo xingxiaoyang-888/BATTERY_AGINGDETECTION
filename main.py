@@ -1,4 +1,4 @@
-"""钠离子电池全生命周期数字孪生平台入口。"""
+"""Legacy Streamlit entry point for the sodium-ion digital twin."""
 
 import streamlit as st
 

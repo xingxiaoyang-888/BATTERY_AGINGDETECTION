@@ -1,4 +1,4 @@
-"""钠离子电池训练前的数据审计。"""
+"""Audit sodium data."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def _hash_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
 
 
 def build_manifest(root: Path) -> Dict[str, dict]:
-    """记录原始数据文件大小和 SHA256，确保本地与服务器数据一致。"""
+    """Record source-file sizes and SHA-256 digests for reproducibility."""
     manifest = {}
     if not root.exists():
         return manifest

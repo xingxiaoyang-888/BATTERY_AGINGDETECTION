@@ -1,21 +1,13 @@
 #!/usr/bin/env python
 # models/soh_ai/run_pipeline.py
-"""
-SOH AI 数据管线 — 运行入口脚本
-====================================
-功能:
-  1. 检查真实数据可用性
-  2. 如有真实数据 → 运行完整管线
-  3. 如无真实数据 → 生成合成数据运行管线（用于开发验证）
-  4. 输出数据质量报告
-"""
+"""Run pipeline."""
 
 import sys
 import os
 import logging
 from pathlib import Path
 
-# 添加项目根目录到 path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 logging.basicConfig(
@@ -26,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 def check_real_data_available() -> bool:
-    """检查是否有可用的真实数据（非 torrent 文件）"""
+    """Check real data available."""
     from models.soh_ai.config import SODIUM_RAW_DATA_DIR
     from utils.download_wenzhou_data import check_data_integrity
 
@@ -37,7 +29,7 @@ def check_real_data_available() -> bool:
 
 
 def run_with_real_data(transfer: bool = False, datasets=None):
-    """使用真实 Wenzhou 数据运行管线"""
+    """Run with real data."""
     from utils.soh_data_loader import WenzhouDataLoader
     from models.soh_ai.data_pipeline import SOHDataPipeline
 
@@ -47,12 +39,12 @@ def run_with_real_data(transfer: bool = False, datasets=None):
         logger.info("模式: 迁移学习 (化学体系感知)")
     logger.info("=" * 60)
 
-    # 1. 加载真实数据
+
     loader = WenzhouDataLoader()
     logger.info("\n>>> 加载数据集...")
 
     if transfer:
-        # 迁移学习模式: 分离源域/目标域
+
         source_cells = []
         for ds in ["cold-curse", "randomized"]:
             try:
@@ -66,7 +58,7 @@ def run_with_real_data(transfer: bool = False, datasets=None):
         all_cells = source_cells + target_cells
         logger.info(f"总计: 源域 {len(source_cells)} + 目标域 {len(target_cells)} = {len(all_cells)} 电芯")
     else:
-        # 默认只加载钠电，避免历史锂电数据污染当前主线。
+
         from utils.sodium_dataset_loader import SodiumDatasetLoader
         all_cells = SodiumDatasetLoader().load_all(include=datasets)
         logger.info(f"钠离子电芯: {len(all_cells)} 个")
@@ -75,7 +67,7 @@ def run_with_real_data(transfer: bool = False, datasets=None):
         logger.error("没有加载到任何电芯数据！")
         return None
 
-    # 2. 运行管线（迁移学习模式启用化学体系感知）
+
     logger.info(f"\n>>> 启动数据管线 ({len(all_cells)} 个电芯)...")
     pipeline = SOHDataPipeline()
     result = pipeline.run(all_cells, save=True,
@@ -87,14 +79,14 @@ def run_with_real_data(transfer: bool = False, datasets=None):
         logger.info(f"  源域电芯: {result.get('source_cells', [])}")
         logger.info(f"  目标域电芯: {result.get('target_cells', [])}")
 
-    # 3. 打印质量报告
+
     print_quality_report(pipeline.quality_report)
 
     return result
 
 
 def run_with_synthetic_data():
-    """使用合成数据运行管线（开发/测试用）"""
+    """Run with synthetic data."""
     from models.soh_ai.data_pipeline import (
         SOHDataPipeline, create_synthetic_test_data
     )
@@ -103,27 +95,27 @@ def run_with_synthetic_data():
     logger.info("使用合成数据运行 SOH 管线 (DEV MODE)")
     logger.info("=" * 60)
 
-    # 1. 生成合成数据
+
     logger.info("\n>>> 生成合成测试数据...")
     cells = create_synthetic_test_data(
-        n_cells=8,      # 模拟 8 个电芯
-        n_cycles=500,   # 每个 500 个循环
+        n_cells=8,
+        n_cycles=500,
         seed=42
     )
 
-    # 2. 运行管线
+
     logger.info(f"\n>>> 启动数据管线 ({len(cells)} 个电芯)...")
     pipeline = SOHDataPipeline()
     result = pipeline.run(cells, save=True)
 
-    # 3. 打印质量报告
+
     print_quality_report(pipeline.quality_report)
 
     return result
 
 
 def print_quality_report(report: dict):
-    """格式化打印数据质量报告"""
+    """Print quality report."""
     print("\n" + "=" * 60)
     print("  数据质量报告 (Data Quality Report)")
     print("=" * 60)
@@ -175,7 +167,7 @@ def main():
     elif args.force_real:
         result = run_with_real_data(transfer=is_transfer, datasets=args.datasets)
     else:
-        # 自动检测
+
         if check_real_data_available():
             result = run_with_real_data(transfer=is_transfer, datasets=args.datasets)
         else:

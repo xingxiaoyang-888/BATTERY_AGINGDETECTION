@@ -1,4 +1,4 @@
-"""钠电删失标签与寿命推理契约测试。"""
+"""Test sodium lifetime."""
 
 import unittest
 

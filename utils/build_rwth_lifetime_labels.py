@@ -1,4 +1,4 @@
-"""从已审计的 RWTH 特征表生成 EOL 与早期 RUL 标签。"""
+"""Build rwth lifetime labels."""
 
 from __future__ import annotations
 

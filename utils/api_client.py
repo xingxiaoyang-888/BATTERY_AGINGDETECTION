@@ -1,4 +1,4 @@
-"""前端访问FastAPI的统一客户端。"""
+"""HTTP client used by the legacy Streamlit interface."""
 
 import os
 from typing import Any, Dict

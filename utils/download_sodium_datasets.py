@@ -1,8 +1,4 @@
-"""公开钠电数据下载助手。
-
-小型 Mendeley NFM 文件可自动下载。RWTH 67 电芯整包约 3.44 GB，站点可能
-触发浏览器挑战，因此默认只输出服务器下载地址和落盘位置。
-"""
+"""Download sodium datasets."""
 
 from __future__ import annotations
 
@@ -104,7 +100,7 @@ def _download_rwth_part(
 def download_rwth_archive(
     destination: Path, connections: int = 12, part_size_mb: int = 64
 ) -> None:
-    """多连接、可断点恢复地下载 RWTH 官方 ZIP，并执行完整性校验。"""
+    """Download rwth archive."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     total_size = _rwth_size(RWTH_ARCHIVE)
     if destination.exists() and destination.stat().st_size == total_size:

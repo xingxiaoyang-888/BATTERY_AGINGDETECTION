@@ -1,4 +1,4 @@
-"""钠离子电池寿命标签、删失统计与工程化 RUL 推理。"""
+"""Right-censored lifetime labels, cohort evidence, and engineering RUL inference."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ def build_eol_labels(
     frame: pd.DataFrame,
     thresholds: Iterable[float] = DEFAULT_EOL_THRESHOLDS,
 ) -> pd.DataFrame:
-    """按电芯生成多阈值 EOL 标签，并显式保留右删失样本。"""
+    """Build per-cell EOL labels while retaining right-censored observations."""
     required = {'cell_id', 'cycle_index', 'soh'}
     missing = sorted(required - set(frame.columns))
     if missing:
@@ -90,7 +90,7 @@ def build_landmark_labels(
     thresholds: Iterable[float] = DEFAULT_EOL_THRESHOLDS,
     observation_fractions: Sequence[float] = (0.25, 0.50, 0.75),
 ) -> pd.DataFrame:
-    """生成早期寿命回测标签；删失样本只提供 RUL 下界。"""
+    """Create early-life backtest labels; censored samples provide only a lower RUL bound."""
     outcomes = build_eol_labels(frame, thresholds)
     outcome_index = outcomes.set_index(['cell_id', 'eol_soh_threshold'])
     rows: List[Dict[str, Any]] = []
@@ -123,7 +123,7 @@ def build_landmark_labels(
 
 
 def summarize_eol_labels(labels: pd.DataFrame) -> Dict[str, Any]:
-    """生成可写入审计报告的删失统计。"""
+    """Summarize observed EOL events and right-censored cells."""
     thresholds = []
     for threshold, group in labels.groupby('eol_soh_threshold', sort=False):
         events = int(group['event_observed'].sum())
@@ -142,7 +142,7 @@ def summarize_eol_labels(labels: pd.DataFrame) -> Dict[str, Any]:
 
 
 class SodiumLifetimePredictor:
-    """RWTH 队列、运行历史和短期 AI 预测融合的钠电 RUL 引擎。"""
+    """Fuse RWTH cohort evidence, observed cell history, and optional short-horizon AI."""
 
     scenario_defaults = {
         'temperature_c': 25.0,
@@ -375,7 +375,7 @@ class SodiumLifetimePredictor:
             scalers = joblib.load(self.weights_dir / 'soh_scalers.pkl')
             self._ai_scaler = scalers['X']
             return True
-        except Exception as exc:  # 模型缺失时仍允许队列基线提供降级服务
+        except Exception as exc:
             self._ai_load_error = str(exc)
             self._ai_model = None
             self._ai_scaler = None

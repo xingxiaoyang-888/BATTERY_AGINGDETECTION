@@ -3,15 +3,15 @@ model SystemForFMI_288x1
   "钠电900V高压包 — 288串1并 (288电芯)，先并后串，适用于大型乘用车/SUV(800V平台)、重型商用车、电网级储能"
   import Modelica.Units.SI;
 
-  // === 结构参数 (编译时固定，决定FMU的数组维度) ===
+
   parameter Integer Ns = 288 "串联组数";
   parameter Integer Np = 1 "每组并联单体数";
 
-  // === 运行时输入 (FMU唯一输入) ===
+
   input SI.Current I_load_external "外部负载电流(A, 正值放电, 负值充电)"
     annotation(Dialog(group="External Control"));
 
-  // === 组件实例 ===
+
   SodiumIonBattery.Packs.SeriesParallelPack pack(
     Ns=Ns,
     Np=Np,
@@ -67,15 +67,15 @@ model SystemForFMI_288x1
     annotation (Placement(transformation(extent={{50,-70},{70,-50}})));
 
 equation
-  // 将FMU外部输入信号接入电流负载
+
   controlled_load.i_ext = I_load_external;
 
-  // 电气回路：负载 → 电池包 → 接地
+
   connect(controlled_load.p, pack.p);
   connect(controlled_load.n, pack.n);
   connect(pack.n, ground.p);
 
-  // 热回路：电池包热端口 → 冷却板
+
   connect(pack.heatPort, cooling.cellPort);
 
   annotation (

@@ -1,18 +1,5 @@
 # models/soh_ai/models.py
-"""
-SOH AI 模型定义 — XGBoost / BiLSTM+Attention / Temporal Transformer
-====================================================================
-
-本模块定义三类模型的神经网络架构和 XGBoost 封装。
-所有模型遵循统一接口:
-  - forward(x) → Tensor  (PyTorch 模型)
-  - predict(X) → np.ndarray  (推理接口)
-
-架构设计原则:
-  1. 输入/输出维度由全局 config 统一管理，避免魔数分散
-  2. 每个模型独立可训练、可保存、可加载
-  3. PyTorch 模型支持 dynamic sequence length（推理时可变）
-"""
+"""Legacy XGBoost, recurrent, Transformer, and ensemble architectures."""
 
 import logging
 import numpy as np
@@ -36,16 +23,16 @@ logger = logging.getLogger(__name__)
 
 
 def _default_soh_feature_index() -> int:
-    """返回标准特征顺序中 SOH 的位置。"""
+    """Locate SOH in the canonical feature ordering."""
     return ACTUAL_FEATURE_COLUMNS.index(FEATURE_CFG.target_col)
 
 
 # ═══════════════════════════════════════════════════════════════
-# 通用工具层
+
 # ═══════════════════════════════════════════════════════════════
 
 def _init_weights(module: nn.Module, method: str = "xavier"):
-    """统一的权重初始化，支持 Xavier / Kaiming / 正交"""
+    """Initialize linear and recurrent layers using the selected weight strategy."""
     if isinstance(module, nn.Linear):
         if method == "xavier":
             nn.init.xavier_uniform_(module.weight, gain=nn.init.calculate_gain('relu'))
@@ -62,13 +49,7 @@ def _init_weights(module: nn.Module, method: str = "xavier"):
 
 
 class PositionalEncoding(nn.Module):
-    """
-    正弦/余弦位置编码，用于 Transformer 注入时序信息。
-
-    与原始 "Attention Is All You Need" 实现一致:
-      PE(pos, 2i)   = sin(pos / 10000^(2i/d_model))
-      PE(pos, 2i+1) = cos(pos / 10000^(2i/d_model))
-    """
+    """Add sinusoidal temporal positions to Transformer input embeddings."""
 
     def __init__(self, d_model: int, max_len: int = 512, dropout: float = 0.1):
         super().__init__()
@@ -92,21 +73,11 @@ class PositionalEncoding(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════════
-# 模型 1: XGBoost 基线 (scikit-learn 兼容封装)
+
 # ═══════════════════════════════════════════════════════════════
 
 class XGBoostWrapper:
-    """
-    XGBoost 回归器的轻量封装，提供与 PyTorch 模型一致的训练/保存/加载接口。
-
-    输入:  (n_samples, seq_len * n_features) — 2D 扁平特征
-    输出:  (n_samples, horizon) — SOH 预测值
-
-    为什么用 XGBoost？
-      - 小数据场景下表现稳定，不易过拟合
-      - 对特征共线性不敏感
-      - 训练极快，可作为快速基线
-    """
+    """Residual XGBoost baseline with single-step prediction and persistence anchoring."""
 
     def __init__(self, cfg=None, residual_learning: bool = True,
                  soh_feature_index: Optional[int] = None):
@@ -118,10 +89,10 @@ class XGBoostWrapper:
         )
         self._model = None
         self._is_fitted = False
-        self._multi_output = False  # 始终为 False（仅保留向后兼容）
+        self._multi_output = False
 
     def _build(self):
-        """延迟构建 XGBoost 模型（避免未安装时导入失败）"""
+        """Construct the optional XGBoost model lazily."""
         try:
             import xgboost as xgb
         except ImportError:
@@ -151,25 +122,11 @@ class XGBoostWrapper:
     def fit(self, X: np.ndarray, y: np.ndarray,
             X_val: Optional[np.ndarray] = None,
             y_val: Optional[np.ndarray] = None) -> "XGBoostWrapper":
-        """
-        训练 XGBoost 模型（仅支持单步预测 horizon=1）。
-
-        ⚠️ 架构决策：电池 RUL 预测不使用 Direct Multi-step 策略。
-        如需多步推演，请在推理时使用自回归滚动 (autoregressive rollout):
-          for step in range(horizon):
-              pred[step] = model.predict(X_last)
-              X_last = slide_window(X_last, pred[step])  # 拼接新预测
-
-        Args:
-            X: 训练特征, shape (n_samples, n_features) — 已处理为 2D
-            y: 训练目标, shape (n_samples, 1) — 原始 SOH 值
-            X_val: 验证特征
-            y_val: 验证目标
-        """
+        """Fit."""
         if self._model is None:
             self._build()
 
-        # 防御性检查：禁止多步预测
+
         y_flat = y.ravel() if y.ndim > 1 else y
         if y.ndim > 1 and y.shape[1] > 1:
             raise ValueError(
@@ -196,7 +153,7 @@ class XGBoostWrapper:
             )
             eval_set = [(X_val, val_target)]
         else:
-            # 无验证集时禁用 early stopping，否则 XGBoost 会报错
+
             self._model.set_params(early_stopping_rounds=None)
 
         self._model.fit(X, train_target, eval_set=eval_set, verbose=False)
@@ -205,7 +162,7 @@ class XGBoostWrapper:
         return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        """预测 SOH 值，返回 (n_samples, 1)"""
+        """Predict."""
         if not self._is_fitted:
             raise RuntimeError("模型尚未训练，请先调用 fit()")
         prediction = self._model.predict(X)
@@ -214,7 +171,7 @@ class XGBoostWrapper:
         return prediction.reshape(-1, 1)
 
     def save(self, filepath: str):
-        """保存模型到磁盘"""
+        """Save."""
         import joblib
         state = {
             'model': self._model,
@@ -227,7 +184,7 @@ class XGBoostWrapper:
 
     @classmethod
     def load(cls, filepath: str, cfg=None) -> "XGBoostWrapper":
-        """从磁盘加载模型"""
+        """Load."""
         import joblib
         state = joblib.load(filepath)
         wrapper = cls(
@@ -235,7 +192,7 @@ class XGBoostWrapper:
             residual_learning=state.get('residual_learning', False),
             soh_feature_index=state.get('soh_feature_index'),
         )
-        # 兼容旧格式（multi_output 残留）
+
         if 'models' in state and 'multi_output' in state:
             wrapper._model = state['models'] if not state['multi_output'] else state['models']  # fallback
         else:
@@ -250,19 +207,11 @@ class XGBoostWrapper:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 模型 2: BiLSTM + Attention
+
 # ═══════════════════════════════════════════════════════════════
 
 class AdditiveAttention(nn.Module):
-    """
-    加性注意力机制 (Bahdanau-style)
-
-    对 LSTM 输出的每个时间步计算注意力权重，加权求和得到上下文向量。
-
-    Args:
-        hidden_dim: LSTM 隐藏状态维度 (双向 = hidden_dim * 2)
-        attention_dim: 注意力投影维度
-    """
+    """Bahdanau-style additive attention over sequence representations."""
 
     def __init__(self, hidden_dim: int, attention_dim: int):
         super().__init__()
@@ -274,16 +223,8 @@ class AdditiveAttention(nn.Module):
 
     def forward(self, lstm_out: torch.Tensor,
                 mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Args:
-            lstm_out: (batch, seq_len, hidden_dim) — LSTM 全序列输出
-            mask:     (batch, seq_len) — True=有效, False=填充
+        """Compute model outputs from the input tensor using the configured feature order."""
 
-        Returns:
-            context:   (batch, hidden_dim) — 注意力加权上下文向量
-            attn_w:    (batch, seq_len)    — 注意力权重（可用于可视化）
-        """
-        # 计算每个时间步的注意力分数
         scores = self.attention(lstm_out).squeeze(-1)  # (batch, seq_len)
 
         if mask is not None:
@@ -295,25 +236,14 @@ class AdditiveAttention(nn.Module):
 
 
 class BiLSTMAttention(nn.Module):
-    """
-    双向 LSTM + 多头加性注意力 + 预测头
-
-    架构:
-      Input ──→ BiLSTM ──→ Attention Pooling ──→ FC Block ──→ Output
-                (2层双向)    (加性注意力)       (Dropout+ReLU)
-
-    输入:  (batch, seq_len, n_features)
-    输出:  (batch, horizon)
-
-    配置来源: LSTMAttentionConfig (config.py)
-    """
+    """Bidirectional LSTM encoder with additive attention and residual SOH prediction."""
 
     def __init__(self, cfg=None, input_dim: int = None,
                  soh_feature_index: Optional[int] = None):
         super().__init__()
         self.cfg = cfg or LSTM_CFG
 
-        # 允许动态覆盖 input_dim（适配数据管线实际特征数）
+
         _input_dim = input_dim or self.cfg.input_dim
         self.soh_feature_index = (
             _default_soh_feature_index()
@@ -329,7 +259,7 @@ class BiLSTMAttention(nn.Module):
         self.bidirectional = self.cfg.bidirectional
         self.horizon = FEATURE_CFG.prediction_horizon
 
-        # BiLSTM 层
+
         self.lstm = nn.LSTM(
             input_size=_input_dim,
             hidden_size=hidden_dim,
@@ -341,13 +271,13 @@ class BiLSTMAttention(nn.Module):
 
         lstm_out_dim = hidden_dim * 2 if self.bidirectional else hidden_dim
 
-        # 注意力池化
+
         self.attention = AdditiveAttention(
             hidden_dim=lstm_out_dim,
             attention_dim=self.cfg.attention_dim,
         )
 
-        # 预测头
+
         self.dropout = nn.Dropout(dropout)
         self.fc = nn.Sequential(
             nn.Linear(lstm_out_dim, hidden_dim),
@@ -362,14 +292,7 @@ class BiLSTMAttention(nn.Module):
 
     def forward(self, x: torch.Tensor,
                 mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        Args:
-            x:    (batch, seq_len, n_features) 输入序列
-            mask: (batch, seq_len) 填充掩码（可选）
-
-        Returns:
-            y: (batch, horizon) SOH 预测值
-        """
+        """Compute model outputs from the input tensor using the configured feature order."""
         lstm_out, (h_n, c_n) = self.lstm(x)  # lstm_out: (B, L, D)
         context, attn_w = self.attention(lstm_out, mask)
         out = self.dropout(context)
@@ -379,7 +302,7 @@ class BiLSTMAttention(nn.Module):
 
     @torch.no_grad()
     def rollout(self, x: torch.Tensor, steps: int, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """基于最近窗口做自回归滚动推演。"""
+        """Roll the latest history window forward autoregressively; enforce a nonincreasing SOH trajectory."""
         preds = []
         cur = x
         cur_mask = mask
@@ -400,31 +323,18 @@ class BiLSTMAttention(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════════
-# 模型 3: Temporal Transformer
+
 # ═══════════════════════════════════════════════════════════════
 
 class TemporalTransformer(nn.Module):
-    """
-    时序 Transformer 编码器 + 预测头
-
-    架构:
-      Input ──→ Linear Projection + Positional Encoding
-            ──→ Transformer Encoder × N_layers
-            ──→ Mean Pooling (可替换为 CLS token)
-            ──→ FC Block ──→ Output
-
-    输入:  (batch, seq_len, n_features)
-    输出:  (batch, horizon)
-
-    配置来源: TransformerConfig (config.py)
-    """
+    """Temporal Transformer encoder with persistence-anchored residual prediction."""
 
     def __init__(self, cfg=None, input_dim: int = None,
                  soh_feature_index: Optional[int] = None):
         super().__init__()
         self.cfg = cfg or TRANSFORMER_CFG
 
-        # 允许动态覆盖 input_dim（适配数据管线实际特征数）
+
         _input_dim = input_dim or self.cfg.input_dim
         self.soh_feature_index = (
             _default_soh_feature_index()
@@ -441,17 +351,17 @@ class TemporalTransformer(nn.Module):
         dropout = self.cfg.dropout
         self.horizon = FEATURE_CFG.prediction_horizon
 
-        # 输入投影：将 n_features 映射到 d_model
+
         self.input_proj = nn.Linear(_input_dim, d_model)
 
-        # 位置编码
+
         self.pos_encoder = PositionalEncoding(
             d_model=d_model,
             max_len=self.cfg.max_seq_len,
             dropout=dropout,
         )
 
-        # Transformer 编码器
+
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
@@ -462,7 +372,7 @@ class TemporalTransformer(nn.Module):
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
-        # 预测头
+
         self.pred_head = nn.Sequential(
             nn.Linear(d_model, d_model // 2),
             nn.GELU(),
@@ -476,23 +386,15 @@ class TemporalTransformer(nn.Module):
 
     def forward(self, x: torch.Tensor,
                 mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        Args:
-            x:    (batch, seq_len, n_features)
-            mask: (batch, seq_len) 1/True=有效位置，0/False=padding
-                  Transformer 期望 True=ignore, 所以需要反转为 src_key_padding_mask
-
-        Returns:
-            y: (batch, horizon)
-        """
+        """Compute model outputs from the input tensor using the configured feature order."""
         current_soh = x[:, -1, self.soh_feature_index].unsqueeze(-1)
 
-        # 投影 + 位置编码
+
         x = self.input_proj(x)  # (B, L, d_model)
         x = self.pos_encoder(x)
 
-        # Transformer 编码
-        # src_key_padding_mask: True = 忽略该位置
+
+
         src_key_padding_mask = None
         if mask is not None:
             src_key_padding_mask = ~mask.bool()
@@ -502,22 +404,22 @@ class TemporalTransformer(nn.Module):
             src_key_padding_mask=src_key_padding_mask,
         )  # (B, L, d_model)
 
-        # 均值池化
+
         if mask is not None:
-            # 仅在有效位置上求均值
+
             valid_mask = mask.bool().unsqueeze(-1).float()  # (B, L, 1)
             pooled = (encoded * valid_mask).sum(dim=1) / valid_mask.sum(dim=1).clamp(min=1)
         else:
             pooled = encoded.mean(dim=1)
 
-        # 预测头
+
         residual = self.pred_head(pooled)  # (B, horizon)
         return current_soh + residual
 
 
     @torch.no_grad()
     def rollout(self, x: torch.Tensor, steps: int, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """自回归滚动推演未来若干步。"""
+        """Roll the latest history window forward autoregressively; enforce a nonincreasing SOH trajectory."""
         preds = []
         cur = x
         cur_mask = mask
@@ -533,21 +435,11 @@ class TemporalTransformer(nn.Module):
         return torch.cat(preds, dim=1)
 
 # ═══════════════════════════════════════════════════════════════
-# 集成模型 (Ensemble)
+
 # ═══════════════════════════════════════════════════════════════
 
 class EnsembleModel:
-    """
-    三模型加权集成预测器
-
-    集成策略:
-      最终预测 = w₁ × XGBoost + w₂ × BiLSTM + w₃ × Transformer
-
-    权重可固定（配置中的默认值）或动态调整（基于各模型验证性能）。
-
-    支持 Bootstrap 不确定性量化:
-      对每个模型进行 N 次采样，输出均值 ± 置信区间。
-    """
+    """Combine available regressors using normalized validation-derived weights."""
 
     def __init__(self, cfg=None):
         self.cfg = cfg or ENSEMBLE_CFG
@@ -562,7 +454,7 @@ class EnsembleModel:
         self._device = torch.device("cpu")
 
     def register(self, name: str, model):
-        """注册子模型"""
+        """Register."""
         if name == 'xgb':
             self.xgb_model = model
         elif name == 'lstm':
@@ -573,7 +465,7 @@ class EnsembleModel:
             raise ValueError(f"未知模型名称: {name}，可选: xgb, lstm, transformer")
 
     def to(self, device: torch.device):
-        """将所有 PyTorch 子模型移至指定设备"""
+        """To."""
         self._device = device
         if self.lstm_model is not None:
             self.lstm_model.to(device)
@@ -582,7 +474,7 @@ class EnsembleModel:
         return self
 
     def set_weights(self, xgb: float = None, lstm: float = None, transformer: float = None):
-        """动态调整集成权重（自动归一化）"""
+        """Normalize and update ensemble weights."""
         w = {
             'xgb': xgb if xgb is not None else self.weights['xgb'],
             'lstm': lstm if lstm is not None else self.weights['lstm'],
@@ -596,21 +488,10 @@ class EnsembleModel:
     def predict(self,
                 X_seq: np.ndarray,
                 return_std: bool = False) -> Dict[str, np.ndarray]:
-        """
-        集成预测。
-
-        Args:
-            X_seq: (n_samples, seq_len, n_features) 序列输入
-            return_std: 是否返回不确定性估计
-
-        Returns:
-            {'ensemble': np.ndarray (n, horizon),
-             'xgb': ..., 'lstm': ..., 'transformer': ...,
-             'std': ... (if return_std)}
-        """
+        """Predict."""
         results = {}
 
-        # XGBoost: 从序列提取表格特征（同 EnsembleTrainer._extract_tabular_features）
+
         if self.xgb_model is not None:
             last_step = X_seq[:, -1, :]
             mean_vals = X_seq.mean(axis=1)
@@ -638,7 +519,7 @@ class EnsembleModel:
                 X_t = torch.FloatTensor(X_seq).to(self._device)
                 results['transformer'] = self.transformer_model(X_t).cpu().numpy()
 
-        # 加权集成
+
         ensemble_pred = None
         total_w = 0.0
         for name, w_key in [('xgb', 'xgb'), ('lstm', 'lstm'), ('transformer', 'transformer')]:
@@ -657,7 +538,7 @@ class EnsembleModel:
 
     @property
     def available_models(self) -> list:
-        """返回已注册的模型名称"""
+        """Available models."""
         models = []
         if self.xgb_model is not None:
             models.append('xgb')

@@ -1,27 +1,6 @@
 #!/usr/bin/env python
 # utils/download_wenzhou_data.py
-"""
-Wenzhou 电池老化数据集 — 下载与提取工具
-==============================================
-
-提供三种方式获取数据:
-
-  方式 1 (推荐): OneDrive 直链下载
-    python utils/download_wenzhou_data.py --method onedrive
-
-  方式 2: Torrent 种子下载 (需要安装 aria2 或 libtorrent)
-    python utils/download_wenzhou_data.py --method torrent
-
-  方式 3: 手动下载提示
-    python utils/download_wenzhou_data.py --method manual
-
-数据下载后将自动解压到指定目录。
-
-来源:
-  GitHub:    https://github.com/lvdongzhen
-  OneDrive:  https://1drv.ms/f/s!AnQLciP1URipksZQPfoVLhdf67Y8mg
-  种子下载:  https://wwqn.lanzoul.com/b00mpeez5c (提取码: dr1x)
-"""
+"""Download wenzhou data."""
 
 import os
 import sys
@@ -42,21 +21,21 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# 配置
+
 # ============================================================
 
-# 项目根目录
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# 数据集存放目录
+
 DATA_DIR = BASE_DIR / "Wenzhou series battery degradation datasets (April_2026)"
 
-# OneDrive 分享链接 (可能有多个)
+
 ONEDRIVE_URLS = {
     "main": "https://1drv.ms/f/s!AnQLciP1URipksZQPfoVLhdf67Y8mg",
 }
 
-# Torrent 文件信息
+
 TORRENT_FILES = {
     "Wenzhou Sodium-ion Battery Degradation Data.torrent": {
         "description": "钠离子电池老化数据 (核心训练集)",
@@ -86,11 +65,11 @@ TORRENT_FILES = {
 }
 
 # ============================================================
-# 下载器
+
 # ============================================================
 
 def check_aria2() -> Optional[str]:
-    """检查系统中是否安装了 aria2"""
+    """Check aria2."""
     aria2 = shutil.which('aria2c') or shutil.which('aria2')
     if aria2:
         logger.info(f"✓ 找到 aria2: {aria2}")
@@ -98,7 +77,7 @@ def check_aria2() -> Optional[str]:
 
 
 def check_libtorrent() -> bool:
-    """检查 Python libtorrent 是否可用"""
+    """Check libtorrent."""
     try:
         import libtorrent
         logger.info(f"✓ libtorrent 已安装: {libtorrent.__version__}")
@@ -109,17 +88,13 @@ def check_libtorrent() -> bool:
 
 
 def download_via_aria2(torrent_path: str, output_dir: str) -> bool:
-    """
-    使用 aria2 下载 torrent
-
-    aria2 比 libtorrent 更可靠，支持多种 tracker
-    """
+    """Download via aria2."""
     aria2 = check_aria2()
     if not aria2:
         logger.error("未找到 aria2。请安装: https://aria2.github.io/")
         return False
 
-    # 获取 tracker 列表
+
     tracker_list = _extract_trackers(torrent_path)
 
     cmd = [
@@ -148,9 +123,7 @@ def download_via_aria2(torrent_path: str, output_dir: str) -> bool:
 
 
 def download_via_libtorrent(torrent_path: str, output_dir: str) -> bool:
-    """
-    使用 Python libtorrent 下载 torrent (备选方案)
-    """
+    """Download via libtorrent."""
     try:
         import libtorrent as lt
         import time as time_mod
@@ -161,12 +134,12 @@ def download_via_libtorrent(torrent_path: str, output_dir: str) -> bool:
     ses = lt.session()
     ses.listen_on(6881, 6891)
 
-    # 设置参数
+
     settings = ses.get_settings()
     settings['user_agent'] = 'python_client/1.0'
     ses.apply_settings(settings)
 
-    # 加载 torrent
+
     info = lt.torrent_info(torrent_path)
     h = ses.add_torrent({'ti': info, 'save_path': output_dir})
 
@@ -202,16 +175,16 @@ def download_via_libtorrent(torrent_path: str, output_dir: str) -> bool:
 
 
 def _extract_trackers(torrent_path: str) -> List[str]:
-    """从 torrent 文件中提取 tracker URL 列表"""
+    """Extract trackers."""
     try:
         with open(torrent_path, 'rb') as f:
             data = f.read().decode('latin-1', errors='ignore')
 
-        # 提取所有 announce URL
+
         import re
-        # 匹配 udp:// 和 http(s):// 开头的 tracker URL
+
         trackers = re.findall(r'(?:udp|https?)://[^\s:"]+:\d+/announce', data)
-        # 去重
+
         trackers = list(set(trackers))
         logger.info(f"  从种子提取 {len(trackers)} 个 tracker")
         return trackers
@@ -221,21 +194,12 @@ def _extract_trackers(torrent_path: str) -> List[str]:
 
 def download_torrent_dataset(dataset_key: str = None,
                              output_dir: str = None) -> bool:
-    """
-    下载指定的 torrent 数据集
-
-    Args:
-        dataset_key: 数据集标识 ("sodium-ion", "cold-curse", "randomized", "pack", "soc", None=全部)
-        output_dir: 输出目录
-
-    Returns:
-        bool: 是否全部成功
-    """
+    """Download torrent dataset."""
     if output_dir is None:
         output_dir = str(DATA_DIR)
     os.makedirs(output_dir, exist_ok=True)
 
-    # 筛选要下载的 torrent
+
     if dataset_key:
         targets = {k: v for k, v in TORRENT_FILES.items()
                    if v['category'] == dataset_key}
@@ -262,7 +226,7 @@ def download_torrent_dataset(dataset_key: str = None,
         logger.info(f"下载: {info['description']}")
         logger.info(f"{'='*60}")
 
-        # 优先使用 aria2
+
         if check_aria2():
             ok = download_via_aria2(torrent_path, output_dir)
         elif check_libtorrent():
@@ -286,11 +250,11 @@ def download_torrent_dataset(dataset_key: str = None,
 
 
 # ============================================================
-# 手动下载指引
+
 # ============================================================
 
 def print_manual_instructions():
-    """打印手动下载指引"""
+    """Print manual instructions."""
     print("""
 ╔══════════════════════════════════════════════════════════════════╗
 ║          Wenzhou 电池老化数据集 — 手动下载指引                    ║
@@ -337,22 +301,11 @@ def print_manual_instructions():
 
 
 # ============================================================
-# 数据完整性检查
+
 # ============================================================
 
 def check_data_integrity() -> Dict[str, any]:
-    """
-    检查已下载数据的完整性
-
-    Returns:
-        Dict: {
-            'total_files': int,
-            'total_size_mb': float,
-            'datasets_found': List[str],
-            'missing': List[str],
-            'can_proceed': bool,
-        }
-    """
+    """Check data integrity."""
     result = {
         'total_files': 0,
         'total_size_mb': 0.0,
@@ -365,7 +318,7 @@ def check_data_integrity() -> Dict[str, any]:
         result['missing'] = list(TORRENT_FILES.keys())
         return result
 
-    # 检查非 torrent 文件
+
     data_files = []
     for f in DATA_DIR.rglob('*'):
         if f.is_file() and f.suffix.lower() not in ['.torrent']:
@@ -374,7 +327,7 @@ def check_data_integrity() -> Dict[str, any]:
     result['total_files'] = len(data_files)
     result['total_size_mb'] = sum(f.stat().st_size for f in data_files) / 1e6
 
-    # 按数据集分类
+
     found_categories = set()
     for f in data_files:
         fname = f.name.lower()
@@ -396,7 +349,7 @@ def check_data_integrity() -> Dict[str, any]:
 
 
 # ============================================================
-# CLI 入口
+
 # ============================================================
 
 def main():
@@ -405,10 +358,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  python utils/download_wenzhou_data.py --method manual       # 查看手动下载指引
-  python utils/download_wenzhou_data.py --method torrent      # 使用 torrent 下载全部
-  python utils/download_wenzhou_data.py --method torrent --dataset sodium-ion  # 仅下载钠电数据
-  python utils/download_wenzhou_data.py --check               # 检查数据完整性
+  python utils/download_wenzhou_data.py --method manual       # Show manual download instructions.
+  python utils/download_wenzhou_data.py --method torrent      # Download all selected torrents.
+  python utils/download_wenzhou_data.py --method torrent --dataset sodium-ion  # Download sodium-ion data only.
+  python utils/download_wenzhou_data.py --check               # Check data integrity.
         """
     )
 
@@ -428,7 +381,7 @@ def main():
 
     args = parser.parse_args()
 
-    # 数据完整性检查
+
     if args.check:
         result = check_data_integrity()
         print(f"\n数据完整性报告:")
@@ -442,7 +395,7 @@ def main():
         print(f"  可进行后续处理: {'✓ 是' if result['can_proceed'] else '✗ 否 — 需要钠离子电池数据'}")
         return
 
-    # 下载
+
     if args.method == 'manual':
         print_manual_instructions()
     elif args.method == 'torrent':

@@ -1,4 +1,4 @@
-"""前端通用工业化组件。"""
+"""Components."""
 
 from html import escape
 

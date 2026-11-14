@@ -3,15 +3,15 @@ model SystemForFMI_20x2
   "低压储能模组 — 20串2并 (40电芯)，先并后串，适用于轻型商用车、48V/72V微混系统、户用储能"
   import Modelica.Units.SI;
 
-  // === 结构参数 (编译时固定，决定FMU的数组维度) ===
+
   parameter Integer Ns = 20 "串联组数";
   parameter Integer Np = 2 "每组并联单体数";
 
-  // === 运行时输入 (FMU唯一输入) ===
+
   input SI.Current I_load_external "外部负载电流(A, 正值放电, 负值充电)"
     annotation(Dialog(group="External Control"));
 
-  // === 组件实例 ===
+
   SodiumIonBattery.Packs.SeriesParallelPack pack(
     Ns=Ns,
     Np=Np,
@@ -67,15 +67,15 @@ model SystemForFMI_20x2
     annotation (Placement(transformation(extent={{50,-70},{70,-50}})));
 
 equation
-  // 将FMU外部输入信号接入电流负载
+
   controlled_load.i_ext = I_load_external;
 
-  // 电气回路：负载 → 电池包 → 接地
+
   connect(controlled_load.p, pack.p);
   connect(controlled_load.n, pack.n);
   connect(pack.n, ground.p);
 
-  // 热回路：电池包热端口 → 冷却板
+
   connect(pack.heatPort, cooling.cellPort);
 
   annotation (

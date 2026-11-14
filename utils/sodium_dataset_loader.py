@@ -1,8 +1,4 @@
-"""公开钠离子电池数据集适配器。
-
-不同来源的数据统一转换为 ``CellDegradationData``，供现有 SOH 数据管线使用。
-默认入口只会返回明确标记为钠离子电池的数据。
-"""
+"""Adapters for public sodium-ion cycling datasets."""
 
 from __future__ import annotations
 
@@ -23,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 def _valid_curve_columns(columns: Iterable[object]) -> List[float]:
-    """返回工作簿中用作固定电压采样点的数值列。"""
+    """Find numeric workbook columns representing fixed voltage sample points."""
     values = []
     for value in columns:
         if isinstance(value, (int, float, np.number)) and np.isfinite(value):
@@ -38,7 +34,7 @@ def _curve_capacity(row: pd.Series, voltage_columns: List[float]) -> float:
 
 
 def _mean_voltage(row: pd.Series, voltage_columns: List[float]) -> float:
-    """按容量增量积分计算循环平均电压。"""
+    """Integrate voltage with respect to capacity increments."""
     capacities = pd.to_numeric(row[voltage_columns], errors="coerce").to_numpy(dtype=float)
     voltages = np.asarray(voltage_columns, dtype=float)
     valid = np.isfinite(capacities) & (capacities >= 0)
@@ -61,10 +57,7 @@ def _mean_voltage(row: pd.Series, voltage_columns: List[float]) -> float:
 
 
 class MendeleyNFMLoader:
-    """读取 Mendeley NFM 4.5 Ah 钠电循环数据。
-
-    ``Dataset 2.xlsx`` 是锂电对照，故意不在文件清单中，纯钠电流程不会加载它。
-    """
+    """Read the Mendeley NFM 4.5 Ah sodium-ion cycling dataset."""
 
     FILES = {
         "Dataset 1-1.xlsx": {"cell_id": "NFM-25C", "temperature_c": 25.0},
@@ -186,7 +179,7 @@ class MendeleyNFMLoader:
 
 
 class RWTHCommercialAgingLoader:
-    """流式读取 RWTH 67 只商业钠电循环老化数据。"""
+    """Stream commercial sodium-ion aging measurements from RWTH files."""
 
     DATASET_ID = "rwth-commercial-sib-aging-67"
     NOMINAL_CAPACITY_AH = 1.2
@@ -251,7 +244,7 @@ class RWTHCommercialAgingLoader:
     def _capacity_segments(
         cls, frame: pd.DataFrame, fallback_temperature_c: float
     ) -> List[Dict[str, float]]:
-        """提取连续恒流段；电流负值为放电，正值为充电。"""
+        """Extract constant-current segments; this source uses negative discharge and positive charge."""
         if frame.empty:
             return []
         segments = []
@@ -300,12 +293,12 @@ class RWTHCommercialAgingLoader:
             c_rate = discharge["mean_current_a"] / cls.NOMINAL_CAPACITY_AH
             is_reference = 0.35 <= c_rate <= 0.65
             is_aging_rate = abs(c_rate - meta["c_rate_discharge"]) <= max(0.15, 0.15 * meta["c_rate_discharge"])
-            # DOD20 的单次容量约为 0.24 Ah，不能使用固定 0.3 Ah 门槛。
+
             expected_capacity = cls.NOMINAL_CAPACITY_AH * meta["dod"]
             if discharge["capacity_ah"] < max(0.05, 0.5 * expected_capacity):
                 continue
-            # 高倍率放电存在明显欧姆压降，负载电压未必达到 3.4 V；
-            # 完整性以倍率匹配、容量门槛和到达下截止电压共同保证。
+
+
             if meta["dod"] == 1.0 and discharge["voltage_min_v"] > 1.7:
                 continue
             if file_kind == "cu" and not is_reference:
@@ -314,7 +307,7 @@ class RWTHCommercialAgingLoader:
                 continue
             candidates.append((discharge, is_reference))
 
-        # 每个 CU 文件只保留容量最大的完整 0.5C 放电，排除预放电和脉冲步骤。
+
         if file_kind == "cu" and candidates:
             candidates = [max(candidates, key=lambda item: item[0]["capacity_ah"])]
 
@@ -455,7 +448,7 @@ class RWTHCommercialAgingLoader:
 
 
 class SodiumDatasetLoader:
-    """统一加载当前可用的纯钠电数据源。"""
+    """Load available sodium-ion datasets without mixing lithium-ion sources."""
 
     SUPPORTED_DATASETS = {"wenzhou", "mendeley-nfm", "rwth"}
 

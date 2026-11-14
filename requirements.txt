@@ -1,4 +1,3 @@
-# 平台基础运行依赖。GPU版PyTorch请按CUDA版本单独安装。
 -r requirements-data.txt
 
 numpy>=1.26,<3

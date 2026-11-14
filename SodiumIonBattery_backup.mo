@@ -1,4 +1,4 @@
-﻿within ;
+within ;
 package SodiumIonBattery
   "钠离子电池包电-热-寿命-故障模型库"
 
@@ -111,9 +111,9 @@ package SodiumIonBattery
         "气体常数（J/(mol.K)）";
       SI.Temperature T_limited "限制后的温度（K）";
     algorithm
-      // smooth() 使温度限幅连续可导，避免求解器在边界处断步
+
       T_limited := noEvent(min(380.0, max(230.0, T)));
-      // 对指数参数做限幅，防止极端温度导致浮点溢出
+
       f := exp(noEvent(max(-50.0, min(50.0, Ea/R_gas*(1/T_ref - 1/T_limited)))));
       annotation (Inline=true);
     end arrheniusFactor;
@@ -202,11 +202,11 @@ package SodiumIonBattery
       Real highC "高倍率项（1）";
     algorithm
       s := clamp01(SOC);
-      // noEvent 抑制零穿越时的事件触发；max(0, ...) 保证非负
+
       lowT := noEvent(max(0.0, (T_ref - T)/max(1.0, 30.0)));
       highSOC := noEvent(max(0.0, (s - SOC_ref)/(max(1e-6, 1.0 - SOC_ref))));
       highC := noEvent(max(0.0, (C_charge - C_ref)/(max(1e-6, C_ref))));
-      // 输出限幅：风险指标不超过 100（物理意义上析钠风险有上限）
+
       risk := noEvent(min(100.0, max(0.0, lowT*highSOC*(1.0 + highC))));
       annotation (Inline=true);
     end sodiumPlatingRisk;
@@ -479,12 +479,12 @@ package SodiumIonBattery
         der(vRC[k]) = iTotal/data.Crc_ref[k] - vRC[k]/max(Rrc[k]*data.Crc_ref[k], 1e-9);
       end for;
 
-      // SOH 限幅保护：不低于 5%，不高于初始值
+
       SOH = noEvent(max(0.05, min(1.0, 1.0 - capacityLossOffset - capacityLossCalendar - capacityLossCycle)));
-      // Q_available 保证至少 5% 残余容量，防止 der(SOC) 分母为零
+
       Q_available = noEvent(max(0.05*data.Q_nominal, data.Q_nominal*SOH));
       der(SOC) = -iTotal/max(1e-6, Q_available);
-      // C_rate 用 max() 保护分母，避免零容量导致除零
+
       C_rate = noEvent(min(100.0, abs(iTotal)/max(1e-6, data.Q_nominal/3600.0)));
       chargeCRate = noEvent(min(100.0, max(0.0, -iTotal)/max(1e-6, data.Q_nominal/3600.0)));
       der(EFC) = noEvent(min(1e6, abs(iTotal)/max(1e-6, 2.0*data.Q_nominal)));
@@ -512,7 +512,7 @@ package SodiumIonBattery
         noEvent(max(-1e8, min(1e8, -iTotal*T*dUdT))) else 0;
       qGenerated = noEvent(max(0.0, min(1e8, qOhmic + qPolarization + qContact + qShort + qReversible)));
 
-      // 温度变化率限幅：防止单步温度跳变超过 100K/s（物理不可行）
+
       data.C_th*der(T) = noEvent(max(-1e5, min(1e5, qGenerated + heatPort.Q_flow)));
       heatPort.T = T;
 

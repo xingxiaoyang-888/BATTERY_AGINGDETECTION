@@ -1,4 +1,4 @@
-"""工业级运行控制台与仿真结果工作区。"""
+"""Dashboard view."""
 
 from collections import namedtuple
 

@@ -1,27 +1,6 @@
 #!/usr/bin/env python
 # train_soh_model.py
-"""
-SOH AI 代理模型 — 训练入口脚本
-=====================================
-
-用法:
-    # 完整训练流程（数据管线 + 模型训练）
-    python train_soh_model.py --pipeline --train
-
-    # 仅数据管线（跳过训练）
-    python train_soh_model.py --pipeline
-
-    # 使用已有处理数据直接训练
-    python train_soh_model.py --train
-
-    # 使用合成数据快速验证
-    python train_soh_model.py --synthetic --train
-
-训练流程:
-    Phase 1: 数据加载 → 特征提取 → 清洗 → 序列构建 → Parquet 存储
-    Phase 2: 模型训练 → XGBoost 基线 → BiLSTM 序列模型 → 验证评估
-    Phase 3: 模型导出 → 权重保存 → 推理测试
-"""
+"""Train soh model."""
 
 import sys
 import os
@@ -29,7 +8,7 @@ import argparse
 import logging
 from pathlib import Path
 
-# 项目根目录
+
 BASE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE_DIR))
 
@@ -42,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 def run_data_pipeline(use_synthetic: bool = False, transfer: bool = False,
                       datasets=None):
-    """Phase 1: 数据管线"""
+    """Run data pipeline."""
     from models.soh_ai.data_pipeline import (
         SOHDataPipeline, create_synthetic_test_data
     )
@@ -52,14 +31,14 @@ def run_data_pipeline(use_synthetic: bool = False, transfer: bool = False,
     logger.info("Phase 1: 数据管线")
     logger.info("=" * 60)
 
-    # 确定数据来源
+
     integrity = check_data_integrity()
 
     if use_synthetic:
         logger.info(f"生成合成测试数据 (8 cells × 500 cycles)...")
         cells = create_synthetic_test_data(n_cells=8, n_cycles=500, seed=42)
     elif transfer:
-        # 迁移学习模式: 分离源域/目标域
+
         from utils.soh_data_loader import WenzhouDataLoader
         loader = WenzhouDataLoader()
         logger.info("迁移学习模式: 分离加载源域(Li-ion)和目标域(Na-ion)数据...")
@@ -85,7 +64,7 @@ def run_data_pipeline(use_synthetic: bool = False, transfer: bool = False,
             )
         logger.info(f"加载了 {len(cells)} 个钠电电芯")
 
-    # 运行管线（迁移学习模式启用 chemistry_aware）
+
     pipeline = SOHDataPipeline()
     result = pipeline.run(cells, save=True,
                          chemistry_aware=transfer,
@@ -95,7 +74,7 @@ def run_data_pipeline(use_synthetic: bool = False, transfer: bool = False,
 
 
 def train_models(result=None, transfer: bool = False):
-    """Phase 2: 模型训练"""
+    """Train models."""
     from models.soh_ai.config import (
         PROCESSED_DATA_DIR, WEIGHTS_DIR,
         XGB_CFG, LSTM_CFG, TRAIN_CFG,
@@ -107,13 +86,13 @@ def train_models(result=None, transfer: bool = False):
         logger.info("模式: 迁移学习 (源域预训练 → 目标域微调)")
     logger.info("=" * 60)
 
-    # 检查处理后的数据是否存在
+
     train_path = os.path.join(PROCESSED_DATA_DIR, 'train.parquet')
     if not os.path.exists(train_path):
         logger.error("未找到处理后的训练数据。请先运行: python train_soh_model.py --pipeline")
         return None
 
-    # --- 加载已处理数据并训练 ---
+
     try:
         from models.soh_ai.trainer import EnsembleTrainer
         from models.soh_ai.data_pipeline import SOHDataPipeline
@@ -121,7 +100,7 @@ def train_models(result=None, transfer: bool = False):
         import joblib
         import json
 
-        # 重建管线产物
+
         feature_df = pd.read_parquet(os.path.join(PROCESSED_DATA_DIR, 'feature_table.parquet'))
         splits = {}
         for name in ['train', 'val', 'test']:
@@ -134,12 +113,12 @@ def train_models(result=None, transfer: bool = False):
         with open(os.path.join(PROCESSED_DATA_DIR, 'feature_columns.json'), 'r') as f:
             feature_cols = json.load(f)
 
-        # 检查是否为迁移学习模式
+
         is_cross = False
         if 'chemistry' in feature_df.columns and feature_df['chemistry'].nunique() > 1:
             is_cross = True
 
-        # 构建序列
+
         pipeline = SOHDataPipeline()
         scaled_splits = pipeline._fit_scale(splits, feature_df)
 
@@ -157,11 +136,11 @@ def train_models(result=None, transfer: bool = False):
             'is_cross_chemistry': is_cross,
         }
 
-        # 如果有源域预训练数据，也加载
+
         pretrain_path = os.path.join(PROCESSED_DATA_DIR, 'pretrain_source.parquet')
         if transfer and is_cross:
             logger.info("迁移学习模式: 加载源域预训练数据...")
-            # 重新运行管线以获取正确的跨域划分
+
             logger.warning("  建议通过 train.py --transfer 运行完整迁移学习流程。")
             logger.warning("  当前 --train 模式从 parquet 文件恢复，可能缺少源域序列。")
 
@@ -189,19 +168,19 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  # 默认：纯钠电数据管线
+  # Default: sodium-only preparation.
   python train_soh_model.py --pipeline
 
-  # 指定数据来源
+  # Select the data source.
   python train_soh_model.py --pipeline --datasets wenzhou mendeley-nfm rwth
 
-  # 可选对照：完整迁移学习流程
+  # Optional transfer-learning comparison.
   python train_soh_model.py --transfer --all
 
-  # 仅数据管线（迁移学习模式）
+  # Prepare transfer-learning data without training.
   python train_soh_model.py --transfer --pipeline
 
-  # 使用合成数据快速验证
+  # Validate with synthetic fixtures.
   python train_soh_model.py --synthetic --all
         """
     )
@@ -222,7 +201,7 @@ def main():
 
     args = parser.parse_args()
 
-    # 默认：如果没有任何参数，运行数据管线
+
     if not args.pipeline and not args.train and not args.all:
         args.pipeline = True
 

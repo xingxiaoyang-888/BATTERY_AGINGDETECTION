@@ -1,26 +1,5 @@
 # models/soh_ai/evaluate.py
-"""
-SOH AI 模型评估与可视化
-==========================
-
-功能:
-  - 回归指标计算 (RMSE, MAE, R², MAPE, Max Error)
-  - 预测 vs 实际对比图
-  - 残差分析与正态性检验
-  - SOH 轨迹推演可视化
-  - 多模型横向对比
-
-用法:
-  from models.soh_ai.evaluate import ModelEvaluator
-
-  evaluator = ModelEvaluator()
-  metrics = evaluator.compute_metrics(y_true, y_pred)          # 数值指标
-  evaluator.plot_predictions(y_true, y_pred, save_path=...)    # 预测对比图
-  evaluator.plot_trajectory(history, future_pred, ...)         # 轨迹推演图
-
-或命令行:
-  python -m models.soh_ai.evaluate --model_dir models/weights/
-"""
+"""Legacy model metrics and diagnostic figures."""
 
 import os
 import sys
@@ -37,14 +16,14 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-# Matplotlib 后端兼容（无 GUI 服务器）
+
 import matplotlib
-matplotlib.use('Agg')  # 非交互后端，适合服务器
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from matplotlib.figure import Figure
 
-# 全局样式配置
+
 plt.rcParams.update({
     'figure.dpi': 120,
     'savefig.dpi': 150,
@@ -53,7 +32,7 @@ plt.rcParams.update({
     'axes.titlesize': 13,
     'axes.labelsize': 12,
 })
-# 尝试使用中文字体（无则回退）
+
 try:
     plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
     plt.rcParams['axes.unicode_minus'] = False
@@ -62,7 +41,7 @@ except Exception:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 指标计算
+
 # ═══════════════════════════════════════════════════════════════
 
 
@@ -140,22 +119,22 @@ class CovariateRolloutConfig:
 
 
 class RegressionMetrics:
-    """回归指标计算器"""
+    """Regression error metrics in the documented target units."""
 
     @staticmethod
     def rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-        """均方根误差"""
+        """Rmse."""
         return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
 
     @staticmethod
     def mae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-        """平均绝对误差"""
+        """Mae."""
         return float(np.mean(np.abs(y_true - y_pred)))
 
     @staticmethod
     def mape(y_true: np.ndarray, y_pred: np.ndarray,
              eps: float = 1e-8) -> float:
-        """平均绝对百分比误差 (%)"""
+        """Return mean absolute percentage error in percent."""
         mask = np.abs(y_true) > eps
         if mask.sum() == 0:
             return float('nan')
@@ -163,7 +142,7 @@ class RegressionMetrics:
 
     @staticmethod
     def r2_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-        """决定系数 R²"""
+        """R2 score."""
         ss_res = np.sum((y_true - y_pred) ** 2)
         ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
         if ss_tot == 0:
@@ -172,12 +151,12 @@ class RegressionMetrics:
 
     @staticmethod
     def max_error(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-        """最大绝对误差"""
+        """Max error."""
         return float(np.max(np.abs(y_true - y_pred)))
 
     @staticmethod
     def explained_variance(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-        """解释方差得分"""
+        """Explained variance."""
         var_resid = np.var(y_true - y_pred)
         var_total = np.var(y_true)
         if var_total == 0:
@@ -187,18 +166,8 @@ class RegressionMetrics:
     @classmethod
     def compute_all(cls, y_true: np.ndarray, y_pred: np.ndarray,
                     model_name: str = "") -> Dict[str, float]:
-        """
-        计算全部回归指标。
+        """Compute all."""
 
-        Args:
-            y_true: 真实值, shape (n_samples,) 或 (n_samples, horizon)
-            y_pred: 预测值, shape 同 y_true
-            model_name: 模型名称标签
-
-        Returns:
-            dict: {指标名: 值}
-        """
-        # 确保扁平化
         yt = y_true.ravel()
         yp = y_pred.ravel()
 
@@ -216,11 +185,11 @@ class RegressionMetrics:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 可视化
+
 # ═══════════════════════════════════════════════════════════════
 
 class Visualizer:
-    """评估可视化 — 每个方法返回 Figure 对象（可保存、可嵌入）"""
+    """Create Matplotlib figures for predictions, residuals, and model comparisons."""
 
     OUTPUT_DIR = Path(__file__).resolve().parent.parent / "data" / "plots"
 
@@ -235,28 +204,24 @@ class Visualizer:
                          title: str = None,
                          save: bool = False,
                          ) -> Figure:
-        """
-        预测值 vs 真实值散点图（含理想对角线）
-
-        越接近对角线 = 模型越准。
-        """
+        """Plot predictions."""
         fig, ax = plt.subplots(figsize=(6, 6))
 
         yt = y_true.ravel()
         yp = y_pred.ravel()
 
-        # 散点
+
         ax.scatter(yt, yp, alpha=0.4, s=8, c='#2b6cb0', edgecolors='none',
                   label=f'n={len(yt)}')
 
-        # 理想对角线
+
         lims = [min(yt.min(), yp.min()), max(yt.max(), yp.max())]
         margin = (lims[1] - lims[0]) * 0.05
         lims[0] -= margin
         lims[1] += margin
         ax.plot(lims, lims, '--', color='#e53e3e', linewidth=1.5, label='Ideal')
 
-        # 标注指标
+
         rmse = RegressionMetrics.rmse(yt, yp)
         r2 = RegressionMetrics.r2_score(yt, yp)
         ax.text(0.05, 0.93,
@@ -287,18 +252,14 @@ class Visualizer:
                        model_name: str = "Model",
                        save: bool = False,
                        ) -> Figure:
-        """
-        残差分析图（残差分布 + Q-Q 检验）
-
-        用于判断模型是否存在系统性偏差。
-        """
+        """Plot residuals."""
         fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
         yt = y_true.ravel()
         yp = y_pred.ravel()
         residuals = yt - yp
 
-        # 左: 残差散点图
+
         ax = axes[0]
         ax.scatter(yp, residuals, alpha=0.4, s=8, c='#2b6cb0', edgecolors='none')
         ax.axhline(y=0, color='#e53e3e', linestyle='--', linewidth=1.5)
@@ -307,7 +268,7 @@ class Visualizer:
         ax.set_title(f'{model_name} — Residuals')
         ax.grid(True, alpha=0.3)
 
-        # 标注残差统计
+
         mean_r = np.mean(residuals)
         std_r = np.std(residuals)
         ax.text(0.05, 0.93,
@@ -316,11 +277,11 @@ class Visualizer:
                 verticalalignment='top',
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
 
-        # 右: 残差直方图
+
         ax = axes[1]
         ax.hist(residuals, bins=40, density=True, alpha=0.7, color='#2b6cb0',
                edgecolor='white', linewidth=0.5)
-        # 叠加正态分布
+
         from scipy import stats as sp_stats
         x_range = np.linspace(residuals.min(), residuals.max(), 200)
         ax.plot(x_range, sp_stats.norm.pdf(x_range, mean_r, std_r),
@@ -349,31 +310,19 @@ class Visualizer:
                         model_name: str = "Model",
                         save: bool = False,
                         ) -> Figure:
-        """
-        SOH 老化轨迹图（历史 + 未来预测 + 拐点标记）
-
-        Args:
-            cycle_indices: 循环序号
-            true_soh: 真实 SOH 序列
-            pred_soh: 模型预测 SOH（与 true_soh 同长度）
-            future_pred: 未来推演的 SOH 序列
-            knee_point: 拐点位置（循环序号）
-            eol_threshold: EOL SOH 阈值线
-            cell_id: 电芯标识
-            model_name: 模型名称
-        """
+        """Plot trajectory."""
         fig, ax = plt.subplots(figsize=(10, 5))
 
-        # 历史真实值
+
         ax.plot(cycle_indices, true_soh, '-', color='#2b6cb0', linewidth=1.5,
                label='True SOH', zorder=3)
 
-        # 模型预测（拟合值）
+
         if pred_soh is not None and len(pred_soh) == len(cycle_indices):
             ax.plot(cycle_indices, pred_soh, '--', color='#3182ce', linewidth=1.2,
                    alpha=0.8, label=f'{model_name} (fit)', zorder=2)
 
-        # 未来推演
+
         if future_pred is not None and len(future_pred) > 0:
             future_start = cycle_indices[-1]
             future_cycles = np.arange(future_start + 1,
@@ -381,11 +330,11 @@ class Visualizer:
             ax.plot(future_cycles, future_pred, '--', color='#e53e3e',
                    linewidth=1.5, label=f'Predicted ({len(future_pred)} cycles)', zorder=4)
 
-        # EOL 阈值线
+
         ax.axhline(y=eol_threshold, color='#d69e2e', linestyle=':',
                   linewidth=1.5, label=f'EOL ({eol_threshold:.0%})')
 
-        # 拐点标记
+
         if knee_point is not None and 0 <= knee_point < len(cycle_indices):
             ax.axvline(x=cycle_indices[knee_point], color='#e53e3e',
                       linestyle='--', linewidth=1, alpha=0.6, label=f'Knee @ cycle {knee_point}')
@@ -421,13 +370,7 @@ class Visualizer:
                               metric_keys: List[str] = None,
                               save: bool = False,
                               ) -> Figure:
-        """
-        多模型指标柱状图对比。
-
-        Args:
-            metrics_list: [{'model': 'xgb', 'RMSE': 0.01, ...}, ...]
-            metric_keys: 要展示的指标 ['RMSE', 'MAE', 'R²']
-        """
+        """Plot model comparison."""
         if metric_keys is None:
             metric_keys = ['RMSE', 'MAE', 'R²']
 
@@ -452,7 +395,7 @@ class Visualizer:
             bars = ax.bar(range(n_models), values, color=colors[:n_models],
                          edgecolor='white', linewidth=0.5)
 
-            # 数值标签
+
             for bar, val in zip(bars, values):
                 if not np.isnan(val):
                     ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
@@ -474,20 +417,11 @@ class Visualizer:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 评估编排器
+
 # ═══════════════════════════════════════════════════════════════
 
 class ModelEvaluator:
-    """
-    SOH 模型评估编排器
-
-    整合指标计算 + 可视化，提供一站式评估接口。
-
-    用法:
-        evaluator = ModelEvaluator(output_dir='models/data/plots')
-        results = evaluator.evaluate(ensemble, X_test, y_test)
-        evaluator.print_summary(results)
-    """
+    """Evaluate individual models and ensembles against held-out observations."""
 
     def __init__(self, output_dir: str = None):
         self.vis = Visualizer(output_dir)
@@ -500,21 +434,12 @@ class ModelEvaluator:
                  model_name: str = "Model",
                  save_plots: bool = True,
                  ) -> Dict[str, any]:
-        """
-        对单个模型或集成模型进行完整评估。
+        """Evaluate."""
 
-        Returns:
-            dict: {
-                'metrics': {...},
-                'figures': [Figure, ...],
-                'predictions': np.ndarray,
-            }
-        """
-        # 预测
         if hasattr(ensemble_or_model, 'predict'):
             preds = ensemble_or_model.predict(X_test)
         else:
-            # 裸 PyTorch 模型
+
             import torch
             device = next(ensemble_or_model.parameters()).device
             ensemble_or_model.eval()
@@ -522,13 +447,13 @@ class ModelEvaluator:
                 X_t = torch.FloatTensor(X_test).to(device)
                 preds = ensemble_or_model(X_t).cpu().numpy()
 
-        # 如果是集成模型返回字典，取 ensemble 预测
+
         if isinstance(preds, dict):
             y_pred = preds.get('ensemble', list(preds.values())[0])
         else:
             y_pred = preds
 
-        # 指标
+
         metrics = self.metrics.compute_all(y_test, y_pred, model_name)
         band_metrics = {}
         y_flat = y_test.ravel()
@@ -540,7 +465,7 @@ class ModelEvaluator:
             if band_mask.any():
                 band_metrics[band_name] = self.metrics.compute_all(y_test[band_mask], y_pred[band_mask], f'{model_name}_{band_name}')
 
-        # 图表
+
         figures = []
         if save_plots:
             figures.append(self.vis.plot_predictions(y_test, y_pred, model_name, save=True))
@@ -559,24 +484,22 @@ class ModelEvaluator:
                      y_test: np.ndarray,
                      save_plots: bool = True,
                      ) -> Dict[str, any]:
-        """
-        对集成模型的所有子模型分别评估 + 横向对比。
-        """
+        """Evaluate all."""
         all_metrics = []
 
-        # 分别评估
+
         preds = ensemble.predict(X_test)
         for name in ensemble.available_models:
             if name in preds:
                 m = self.metrics.compute_all(y_test, preds[name], name)
                 all_metrics.append(m)
 
-        # 集成模型
+
         if 'ensemble' in preds:
             m = self.metrics.compute_all(y_test, preds['ensemble'], 'Ensemble')
             all_metrics.append(m)
 
-        # 横向对比图
+
         comp_fig = None
         if save_plots and len(all_metrics) > 1:
             comp_fig = self.vis.plot_model_comparison(all_metrics, save=True)
@@ -715,7 +638,7 @@ class ModelEvaluator:
         if 'coulombic_efficiency' in feature_index:
             next_step[0, feature_index['coulombic_efficiency']] = float(np.clip(next_step[0, feature_index['coulombic_efficiency']], rollout_cfg.min_coulombic_efficiency, 1.0))
 
-        # 滚动后同步更新 SOH 派生特征，防止后续步骤继续读取旧差分。
+
         extended = np.concatenate([seq, next_step], axis=0)
         soh_values = extended[:, feature_index['soh']]
         for name, lag in [('soh_diff_1', 1), ('soh_diff_3', 3), ('soh_diff_5', 5)]:
@@ -773,7 +696,7 @@ class ModelEvaluator:
 
     @staticmethod
     def _infer_input_dim(state_dict: dict, fallback: int) -> int:
-        """从权重字典推断输入维度。"""
+        """Infer input dim."""
         candidate_keys = [
             'lstm.weight_ih_l0',
             'input_proj.weight',
@@ -812,11 +735,11 @@ class ModelEvaluator:
                     window = archive[archive.files[0]].astype(np.float32)
             elif suffix == '.parquet':
                 fname = path_obj.name.lower()
-                # test.parquet 等已缩放 → 回退到 feature_table.parquet (原始物理值)
+
                 if fname in {'train.parquet', 'val.parquet', 'test.parquet'}:
                     raw_path = path_obj.parent / 'feature_table.parquet'
                     if raw_path.exists():
-                        path_obj = raw_path  # 切换到未缩放数据源
+                        path_obj = raw_path
                 df = pd.read_parquet(path_obj)
                 if 'cell_id' in df.columns:
                     target_cell = cell_id if cell_id else str(df['cell_id'].iloc[-1])
@@ -908,7 +831,7 @@ class ModelEvaluator:
             context['history_soh'] = history_df['soh'].to_numpy(dtype=np.float32) if 'soh' in history_df.columns else None
             return context
 
-        # npy / npz 的 fallback
+
         window = cls._load_window(window_data, history_cycles=history_cycles)
         context['history_cycle_indices'] = np.arange(1, window.shape[0] + 1)
         context['history_soh'] = window[:, 0] if window.shape[1] > 0 else None
@@ -981,13 +904,13 @@ class ModelEvaluator:
 
     @staticmethod
     def print_summary(results: Dict[str, any]):
-        """格式化打印评估摘要"""
+        """Print summary."""
         print("\n" + "=" * 60)
         print("  SOH 模型评估报告")
         print("=" * 60)
 
         if 'per_model' in results:
-            # 多模型对比
+
             print(f"\n{'Model':<15} {'RMSE':>10} {'MAE':>10} {'R²':>10} {'MAPE%':>10}")
             print("-" * 60)
             for m in results['per_model']:
@@ -1051,11 +974,11 @@ class ModelEvaluator:
         if xgb_path.exists():
             ensemble.register('xgb', XGBoostWrapper.load(str(xgb_path)))
         if lstm_path.exists():
-            # 优先加载 best checkpoint
+
             best_path = lstm_path.parent / 'checkpoints' / 'lstm_attention_best.pt'
             load_path = best_path if best_path.exists() else lstm_path
-            lstm_state = torch.load(str(load_path), map_location='cpu')
-            # 兼容 checkpoint dict vs 纯 state_dict
+            lstm_state = torch.load(str(load_path), map_location='cpu', weights_only=True)
+
             if 'model_state_dict' in lstm_state:
                 lstm_state = lstm_state['model_state_dict']
             lstm_input_dim = evaluator._infer_input_dim(lstm_state, len(ACTUAL_FEATURE_COLUMNS))
@@ -1064,7 +987,7 @@ class ModelEvaluator:
             m.eval()
             ensemble.register('lstm', m)
         if tf_path.exists():
-            tf_state = torch.load(str(tf_path), map_location='cpu')
+            tf_state = torch.load(str(tf_path), map_location='cpu', weights_only=True)
             tf_input_dim = evaluator._infer_input_dim(tf_state, len(ACTUAL_FEATURE_COLUMNS))
             m = TemporalTransformer(input_dim=tf_input_dim)
             m.load_state_dict(tf_state)

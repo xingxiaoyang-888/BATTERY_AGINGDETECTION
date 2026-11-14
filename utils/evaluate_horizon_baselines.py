@@ -1,9 +1,4 @@
-"""评估不同预测跨度下的 XGBoost 与持久性基线。
-
-该脚本采用按电芯留一交叉验证，直接预测未来第 N 个循环的 SOH。
-持久性基线定义为 ``SOH(t + N) = SOH(t)``，用于判断模型是否真正
-优于“健康状态短期不变”的朴素假设。
-"""
+"""Evaluate horizon baselines."""
 
 from __future__ import annotations
 
@@ -45,7 +40,7 @@ def evaluate_horizons(
     horizons: Iterable[int],
     lookback: int = 32,
 ) -> dict:
-    """按电芯留一评估多个直接预测跨度。"""
+    """Evaluate horizons."""
     feature_cols = _feature_columns(df)
     scale_cols = [col for col in feature_cols if col != FEATURE_CFG.target_col]
     soh_index = feature_cols.index(FEATURE_CFG.target_col)
@@ -142,7 +137,7 @@ def evaluate_fixed_split_horizons(
     horizons: Iterable[int],
     lookback: int = 32,
 ) -> dict:
-    """在冻结的电芯级 train/val/test 划分上评估多跨度基线。"""
+    """Evaluate fixed split horizons."""
     train, val, test = (splits[name].copy() for name in ("train", "val", "test"))
     feature_cols = _feature_columns(train)
     scale_cols = [col for col in feature_cols if col != FEATURE_CFG.target_col]

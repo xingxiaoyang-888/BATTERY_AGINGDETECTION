@@ -1,4 +1,4 @@
-"""仿真工作区侧边栏。"""
+"""Sidebar view."""
 
 import os
 

@@ -1,4 +1,4 @@
-"""寿命按电芯留一回测协议测试。"""
+"""Test lifetime backtest."""
 
 import unittest
 

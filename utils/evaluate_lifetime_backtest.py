@@ -1,9 +1,4 @@
-"""钠电寿命引擎的按电芯留一回测。
-
-每一折从参考队列中彻底移除待测电芯，再在该电芯 25%/50%/75%
-寿命观测点预测 RUL。达到 EOL 的样本计算误差和区间覆盖率；未达到 EOL
-的右删失样本只检查预测寿命是否超过已知下界，不伪造真实 RUL。
-"""
+"""Evaluate lifetime backtest."""
 
 from __future__ import annotations
 

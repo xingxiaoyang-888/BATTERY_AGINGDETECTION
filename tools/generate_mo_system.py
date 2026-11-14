@@ -1,35 +1,24 @@
 #!/usr/bin/env python3
-"""
-钠离子电池包 FMU 系统模型自动生成器
-
-用法:
-  python tools/generate_fmu_model.py --ns 96 --np 1
-  python tools/generate_fmu_model.py --ns 192 --np 2 --label "800V平台"
-  python tools/generate_fmu_model.py --batch          # 批量生成所有常用规格
-  python tools/generate_fmu_model.py --list           # 仅列出将要生成的规格
-
-输出文件命名:
-  SystemForFMI_NSxNP.mo
-"""
+"""Generate mo system."""
 
 import os
 import argparse
 
-# ── 模板 (用 __TOKEN__ 避免与 Modelica {} 冲突) ──────
+
 MODEL_TEMPLATE = r'''within ;
 model SystemForFMI___NS__x__NP__
   "__DESCRIPTION__"
   import Modelica.Units.SI;
 
-  // === 结构参数 (编译时固定，决定FMU的数组维度) ===
+  // Fixed structural parameters determine the compiled FMU dimensions.
   parameter Integer Ns = __NS__ "串联组数";
   parameter Integer Np = __NP__ "每组并联单体数";
 
-  // === 运行时输入 (FMU唯一输入) ===
+  // The single runtime FMU input.
   input SI.Current I_load_external "外部负载电流(A, 正值放电, 负值充电)"
     annotation(Dialog(group="External Control"));
 
-  // === 组件实例 ===
+  // Component instances.
   SodiumIonBattery.Packs.SeriesParallelPack pack(
     Ns=Ns,
     Np=Np,
@@ -85,15 +74,15 @@ model SystemForFMI___NS__x__NP__
     annotation (Placement(transformation(extent={{50,-70},{70,-50}})));
 
 equation
-  // 将FMU外部输入信号接入电流负载
+  // Connect the external FMU input to the controlled load.
   controlled_load.i_ext = I_load_external;
 
-  // 电气回路：负载 → 电池包 → 接地
+  // Electrical circuit: load, battery pack, and ground.
   connect(controlled_load.p, pack.p);
   connect(controlled_load.n, pack.n);
   connect(pack.n, ground.p);
 
-  // 热回路：电池包热端口 → 冷却板
+  // Connect the pack thermal port to the cooling plate.
   connect(pack.heatPort, cooling.cellPort);
 
   annotation (
@@ -116,7 +105,7 @@ end SystemForFMI___NS__x__NP__;
 
 
 def classify_use_case(ns: int, np: int, voltage: float, energy: float) -> str:
-    """根据电压等级和电芯数自动推断适用场景"""
+    """Classify use case."""
     total_cells = ns * np
 
     if voltage <= 48:
@@ -149,7 +138,7 @@ def make_description(ns: int, np: int, label: str, use_case: str) -> str:
 
 def generate_model(ns: int, np: int, label: str = None,
                    use_case: str = None, output_dir: str = ".") -> str:
-    """生成单个系统模型 .mo 文件，返回文件路径"""
+    """Generate model."""
     total_cells = ns * np
     nominal_voltage = round(ns * 3.1, 1)
     nominal_energy = round(50.0 * 3.1 * np * ns / 1000.0, 1)
@@ -176,52 +165,51 @@ def generate_model(ns: int, np: int, label: str = None,
     return filepath
 
 
-# ── 预定义常用规格 ──────────────────────────────────
 COMMON_CONFIGS = [
-    (ns, np, label, None)  # use_case=None 让脚本自动推断
+    (ns, np, label, None)
     for ns, np, label in [
-        # --- 微型/低压 (≤48V) ---
+
         (8,   2,  "微型模组"),
         (12,  2,  "小型模组"),
         (16,  1,  "低压串联模组"),
         (16,  3,  "中型低压模组"),
         (20,  2,  "低压储能模组"),
 
-        # --- 中压储能/商用车 (48V~160V) ---
+
         (16,  4,  "储能单簇"),
         (24,  2,  "轻商用车模组"),
         (32,  2,  "中型储能模组"),
         (48,  1,  "小型乘用车"),
         (48,  2,  "小型乘用车高容"),
 
-        # --- 400V 乘用车平台 (160V~350V) ---
+
         (96,  1,  "乘用车标准包"),
         (96,  2,  "乘用车大容量包"),
         (96,  3,  "乘用车高续航包"),
         (100, 1,  "400V标准平台"),
         (100, 2,  "400V大容量平台"),
         (108, 2,  "400V长续航平台"),
-        # 钠离子电池 400V 等效（串联数更多以补偿单体低压）
+
         (128, 1,  "钠电400V标准包"),
         (128, 2,  "钠电400V大容量包"),
 
-        # --- 800V 高压平台 (≥450V) ---
+
         (192, 1,  "800V标准平台"),
         (192, 2,  "800V高性能平台"),
         (200, 1,  "800V通用平台"),
         (216, 1,  "800V长续航平台"),
-        # 钠离子电池高压等效
+
         (256, 1,  "钠电800V标准包"),
         (288, 1,  "钠电900V高压包"),
 
-        # --- 电网级储能 (≥1000V) ---
+
         (480, 1,  "钠电1500V储能包"),
     ]
 ]
 
 
 def batch_generate(output_dir: str = ".", dry_run: bool = False):
-    """批量生成全部常用规格"""
+    """Batch generate."""
     results = []
     for ns, np, label, use_case in COMMON_CONFIGS:
         params = {
@@ -240,7 +228,7 @@ def batch_generate(output_dir: str = ".", dry_run: bool = False):
 
 
 def print_list():
-    """打印所有将要生成的规格表格"""
+    """Print list."""
     print("将要生成的 FMU 模型文件:\n")
     print(f"{'规格':<16} {'电芯数':<8} {'额定电压':<10} {'额定能量':<10} {'适用场景'}")
     print("-" * 100)

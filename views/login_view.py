@@ -1,4 +1,4 @@
-"""平台登录与注册视图。"""
+"""Login view."""
 
 import time
 
@@ -85,12 +85,12 @@ def render_login():
         with register_tab:
             with st.form("register_form", border=False):
                 new_user = st.text_input("新账户名称", placeholder="至少3个字符")
-                new_password = st.text_input("设置密码", type="password", placeholder="至少4个字符")
+                new_password = st.text_input("设置密码", type="password", placeholder="12–72 UTF-8 bytes")
                 confirmed = st.text_input("确认密码", type="password", placeholder="再次输入密码")
                 submitted = st.form_submit_button("创建工程账户", use_container_width=True)
                 if submitted:
-                    if len(new_user.strip()) < 3 or len(new_password) < 4:
-                        st.warning("账户至少3个字符，密码至少4个字符。")
+                    if len(new_user.strip()) < 3 or not 12 <= len(new_password.encode("utf-8")) <= 72:
+                        st.warning("账户至少3个字符，密码12–72 UTF-8 bytes。")
                     elif new_password != confirmed:
                         st.warning("两次输入的密码不一致。")
                     else:

@@ -1,108 +1,115 @@
-# utils/db_manager.py
+"""Legacy local accounts and history with scoped connections and explicit provisioning."""
+
+from contextlib import contextmanager
+from datetime import datetime
+import json
+import os
 import sqlite3
 import bcrypt
-import json
-from datetime import datetime
-import os
 
-# 数据库文件路径
-DB_PATH = "battery_app.db"
+DB_PATH = os.getenv(
+    "SODIUM_LEGACY_DB", os.path.join(os.path.dirname(os.path.dirname(__file__)), "battery_app.db")
+)
+
+
+@contextmanager
+def _connection():
+    connection = sqlite3.connect(DB_PATH, timeout=15)
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
+def _validate_credentials(username, password):
+    if not 3 <= len(username.strip()) <= 80:
+        raise ValueError("Username must contain 3–80 characters.")
+    if not 12 <= len(password.encode("utf-8")) <= 72:
+        raise ValueError("Password must contain 12–72 UTF-8 bytes.")
+
 
 def init_db():
-    """初始化数据库表结构"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    
-    # 1. 用户表
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            username TEXT PRIMARY KEY,
-            password_hash BLOB NOT NULL
-        )
-    ''')
-    
-    # 2. 仿真历史表 (表名统一为 history)
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT,
-            timestamp DATETIME,
-            config TEXT,  -- 存 JSON 字符串
-            kpis TEXT,    -- 存 JSON 字符串
-            FOREIGN KEY(username) REFERENCES users(username)
-        )
-    ''')
-    
-    # 创建默认管理员 (密码: 1234)
-    try:
-        pwd_hash = bcrypt.hashpw("1234".encode('utf-8'), bcrypt.gensalt())
-        c.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", 
-                  ("admin", pwd_hash))
-    except sqlite3.IntegrityError:
-        pass # admin 已存在
-        
-    conn.commit()
-    conn.close()
+    """Create tables; provision an administrator only through explicit environment values."""
+    password = os.getenv("SODIUM_ADMIN_PASSWORD")
+    username = os.getenv("SODIUM_ADMIN_USER", "admin")
+    if password:
+        _validate_credentials(username, password)
+    with _connection() as connection:
+        connection.executescript("""
+            CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                password_hash BLOB NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT,
+                timestamp DATETIME,
+                config TEXT,
+                kpis TEXT,
+                FOREIGN KEY(username) REFERENCES users(username)
+            );
+        """)
+        if password:
+            encoded = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt())
+            connection.execute("INSERT OR IGNORE INTO users VALUES (?, ?)", (username, encoded))
+
 
 def verify_user(username, password):
-    """验证登录"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT password_hash FROM users WHERE username=?", (username,))
-    result = c.fetchone()
-    conn.close()
-    
-    if result:
-        if bcrypt.checkpw(password.encode('utf-8'), result[0]):
-            return True
-    return False
+    """Verify existing hashes without changing or silently truncating a password."""
+    if len(password.encode("utf-8")) > 72:
+        return False
+    with _connection() as connection:
+        result = connection.execute(
+            "SELECT password_hash FROM users WHERE username=?", (username,)
+        ).fetchone()
+    if not result:
+        return False
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), result[0])
+    except (ValueError, TypeError):
+        return False
+
 
 def register_user(username, password):
-    """注册新用户"""
-    conn = sqlite3.connect(DB_PATH)
+    """Register a validated local account and preserve the legacy return contract."""
     try:
-        pwd_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
-        conn.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, pwd_hash))
-        conn.commit()
-        return True, "注册成功"
+        _validate_credentials(username, password)
+    except ValueError as exc:
+        return False, str(exc)
+    encoded = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt())
+    try:
+        with _connection() as connection:
+            connection.execute("INSERT INTO users VALUES (?, ?)", (username.strip(), encoded))
+        return True, "Account created."
     except sqlite3.IntegrityError:
-        return False, "用户名已存在"
-    finally:
-        conn.close()
+        return False, "Username already exists."
+
 
 def save_simulation(username, config_dict, kpi_dict):
-    """保存仿真记录"""
-    conn = sqlite3.connect(DB_PATH)
-    
-    # 简单的 numpy 类型清洗，防止 JSON 序列化报错
-    clean_kpis = {}
-    for k, v in kpi_dict.items():
-        if hasattr(v, 'item'): 
-            clean_kpis[k] = v.item()
-        else:
-            clean_kpis[k] = v
-            
-    conn.execute("INSERT INTO history (username, timestamp, config, kpis) VALUES (?, ?, ?, ?)",
-                 (username, datetime.now().strftime("%Y-%m-%d %H:%M"), 
-                  json.dumps(config_dict), json.dumps(clean_kpis)))
-    conn.commit()
-    conn.close()
+    """Persist a simulation summary using bound SQL parameters."""
+    clean = {
+        key: value.item() if hasattr(value, "item") else value for key, value in kpi_dict.items()
+    }
+    with _connection() as connection:
+        connection.execute(
+            "INSERT INTO history (username,timestamp,config,kpis) VALUES (?,?,?,?)",
+            (
+                username,
+                datetime.now().strftime("%Y-%m-%d %H:%M"),
+                json.dumps(config_dict, allow_nan=False),
+                json.dumps(clean, allow_nan=False),
+            ),
+        )
 
-# [关键修复] 函数名必须是 get_history，以匹配 dashboard_view.py 的导入
+
 def get_history(username):
-    """获取用户历史记录"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    # 倒序查询最近 10 条
-    c.execute("SELECT timestamp, config, kpis FROM history WHERE username=? ORDER BY id DESC LIMIT 10", (username,))
-    rows = c.fetchall()
-    conn.close()
-    
-    history = []
-    for r in rows:
-        history.append({
-            "time": r[0],
-            "config": json.loads(r[1]),
-            "kpis": json.loads(r[2])
-        })
-    return history
+    """Return the ten most recent runs belonging to the selected account."""
+    with _connection() as connection:
+        rows = connection.execute(
+            "SELECT timestamp,config,kpis FROM history WHERE username=? ORDER BY id DESC LIMIT 10",
+            (username,),
+        ).fetchall()
+    return [
+        {"time": row[0], "config": json.loads(row[1]), "kpis": json.loads(row[2])} for row in rows
+    ]

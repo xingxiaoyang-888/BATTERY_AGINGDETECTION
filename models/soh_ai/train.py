@@ -1,34 +1,6 @@
 #!/usr/bin/env python
 # models/soh_ai/train.py
-"""
-SOH AI 模型训练 — 命令行入口
-=================================
-
-用法:
-  # 全量训练（所有模型）
-  python -m models.soh_ai.train
-
-  # 仅训练指定模型
-  python -m models.soh_ai.train --model lstm
-  python -m models.soh_ai.train --model xgb --model transformer
-
-  # 自定义超参数
-  python -m models.soh_ai.train --model lstm --epochs 300 --batch_size 32 --lr 0.001
-
-  # 使用合成数据（无真实数据时）
-  python -m models.soh_ai.train --synthetic --model all
-
-  # 从检查点恢复训练
-  python -m models.soh_ai.train --resume models/weights/checkpoints/lstm_attention_best.pt
-
-  # K-Fold 交叉验证
-  python -m models.soh_ai.train --kfold 5
-
-设计原则:
-  1. 所有参数通过命令行传递，方便远程服务器运行
-  2. 训练失败时保留已有模型和日志
-  3. 详细的分阶段日志，方便排查问题
-"""
+"""Train."""
 
 import sys
 import os
@@ -39,17 +11,17 @@ import warnings
 from pathlib import Path
 from datetime import datetime
 
-# 确保项目根目录在 Python path 中
+
 _project_root = Path(__file__).resolve().parent.parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 # ═══════════════════════════════════════════════════════════════
-# 日志配置
+
 # ═══════════════════════════════════════════════════════════════
 
 def setup_logging(log_dir: str = None, verbose: bool = False):
-    """配置双通道日志：控制台 + 文件"""
+    """Setup logging."""
     log_dir = Path(log_dir or (_project_root / "models" / "logs"))
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -60,18 +32,18 @@ def setup_logging(log_dir: str = None, verbose: bool = False):
     fmt = '%(asctime)s [%(levelname)-7s] %(name)s: %(message)s'
     datefmt = '%H:%M:%S'
 
-    # 根 logger
+
     root = logging.getLogger()
     root.setLevel(level)
     root.handlers.clear()
 
-    # 控制台 handler
+
     console = logging.StreamHandler(sys.stdout)
     console.setLevel(level)
     console.setFormatter(logging.Formatter(fmt, datefmt))
     root.addHandler(console)
 
-    # 文件 handler
+
     file_handler = logging.FileHandler(log_file, encoding='utf-8')
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(logging.Formatter(fmt, datefmt))
@@ -83,7 +55,7 @@ def setup_logging(log_dir: str = None, verbose: bool = False):
 
 
 def summarize_kfold_results(fold_scores: list) -> dict:
-    """汇总 KFold 每个模型的指标均值和标准差。"""
+    """Summarize kfold results."""
     from collections import defaultdict
     import numpy as np
 
@@ -110,19 +82,14 @@ def summarize_kfold_results(fold_scores: list) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 训练主函数
+
 # ═══════════════════════════════════════════════════════════════
 
 def run_training(args: argparse.Namespace) -> int:
-    """
-    执行训练流程。
-
-    Returns:
-        int: 0 = 成功, 非0 = 失败
-    """
+    """Run training."""
     logger = logging.getLogger(__name__)
 
-    # ── 1. 配置检查 ──
+
     logger.info("=" * 70)
     logger.info("  SOH AI 模型训练启动")
     logger.info("=" * 70)
@@ -130,7 +97,7 @@ def run_training(args: argparse.Namespace) -> int:
     logger.info(f"  Python: {sys.version}")
     logger.info(f"  项目根目录: {_project_root}")
 
-    # 检查 PyTorch / CUDA
+
     try:
         import torch
         cuda_ok = torch.cuda.is_available()
@@ -141,7 +108,7 @@ def run_training(args: argparse.Namespace) -> int:
         logger.error("  PyTorch 未安装! 请运行: pip install torch")
         return 1
 
-    # ── 2. 加载数据 ──
+
     logger.info("\n" + "=" * 70)
     logger.info("  阶段 A: 数据加载")
     logger.info("=" * 70)
@@ -178,12 +145,12 @@ def run_training(args: argparse.Namespace) -> int:
         if is_transfer:
             from utils.soh_data_loader import WenzhouDataLoader
             loader = WenzhouDataLoader()
-            # 迁移学习模式: 分离加载源域 (Li-ion) 和目标域 (Na-ion)
+
             logger.info("  迁移学习模式: 分离源域/目标域数据")
             source_cells = []
             target_cells = []
 
-            # 源域: 锂离子电池 (冷诅咒 + 随机工况)
+
             for ds in ["cold-curse", "randomized"]:
                 try:
                     cells = loader.load_dataset(ds)
@@ -192,7 +159,7 @@ def run_training(args: argparse.Namespace) -> int:
                 except Exception as e:
                     logger.warning(f"  ✗ [源域] {ds}: {e}")
 
-            # 目标域: 钠离子电池
+
             try:
                 target_cells = loader.load_dataset("sodium-ion")
                 logger.info(f"  ✓ [目标域] sodium-ion: {len(target_cells)} 个电芯")
@@ -204,7 +171,7 @@ def run_training(args: argparse.Namespace) -> int:
                 return 2
 
             logger.info(f"  源域: {len(source_cells)} 电芯 | 目标域: {len(target_cells)} 电芯")
-            # 合并传给管线，管线的 chemistry_aware 模式会自动隔离
+
             cells = source_cells + target_cells
         else:
             from utils.sodium_dataset_loader import SodiumDatasetLoader
@@ -218,7 +185,7 @@ def run_training(args: argparse.Namespace) -> int:
     if processed is None:
         logger.info(f"  总计 {len(cells)} 个电芯用于训练")
 
-    # ── 3. 数据管线 ──
+
     logger.info("\n" + "=" * 70)
     logger.info("  阶段 B: 数据管线处理")
     logger.info("=" * 70)
@@ -238,7 +205,7 @@ def run_training(args: argparse.Namespace) -> int:
     else:
         logger.info("  已处理输入通过恢复校验，跳过原始数据解析与特征重算")
 
-    # 打印数据摘要
+
     logger.info(f"  特征表: {processed['feature_df'].shape}")
     logger.info(f"  跨化学体系: {processed.get('is_cross_chemistry', False)}")
     for name, (X, y) in processed['sequences'].items():
@@ -247,7 +214,7 @@ def run_training(args: argparse.Namespace) -> int:
         for name, (X, y) in processed['pretrain_sequences'].items():
             logger.info(f"  source_{name}: X{X.shape}, y{y.shape}")
 
-    # ── 4. 模型训练 ──
+
     logger.info("\n" + "=" * 70)
     logger.info("  阶段 C: 模型训练")
     if is_transfer and processed.get('is_cross_chemistry'):
@@ -270,7 +237,7 @@ def run_training(args: argparse.Namespace) -> int:
     skip_lstm = 'lstm' not in models_to_train
     skip_transformer = 'transformer' not in models_to_train
 
-    # 自定义超参数
+
     epoch_overrides = {}
     if args.epochs:
         epoch_overrides['lstm'] = args.epochs
@@ -279,7 +246,7 @@ def run_training(args: argparse.Namespace) -> int:
         epoch_overrides['lstm_batch'] = args.batch_size
         epoch_overrides['transformer_batch'] = args.batch_size
 
-    # KFold 在迁移学习模式下禁用（数据划分已由 chemistry 感知管线控制）
+
     if args.kfold is not None and (is_transfer and processed.get('is_cross_chemistry')):
         logger.warning("  ⚠️ 迁移学习模式下 KFold 不可用（数据划分已由化学体系感知管线控制），"
                        "忽略 --kfold 参数")
@@ -359,7 +326,7 @@ def run_training(args: argparse.Namespace) -> int:
         logger.error(f"  训练失败: {e}", exc_info=args.verbose)
         return 4
 
-    # ── 5. 保存 ──
+
     logger.info("\n" + "=" * 70)
     logger.info("  阶段 D: 持久化")
     logger.info("=" * 70)
@@ -367,7 +334,7 @@ def run_training(args: argparse.Namespace) -> int:
     output_dir = args.output_dir or str(WEIGHTS_DIR)
     ensemble_trainer.save_all(output_dir)
 
-    # 保存运行配置（用于复现）
+
     run_config = {
         'timestamp': datetime.now().isoformat(),
         'arguments': vars(args),
@@ -380,7 +347,7 @@ def run_training(args: argparse.Namespace) -> int:
         json.dump(run_config, f, indent=2, ensure_ascii=False, default=str)
     logger.info(f"  运行配置已保存: {config_path}")
 
-    # ── 6. 摘要 ──
+
     logger.info("\n" + "=" * 70)
     logger.info("  训练摘要")
     logger.info("=" * 70)
@@ -396,7 +363,7 @@ def run_training(args: argparse.Namespace) -> int:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 命令行解析
+
 # ═══════════════════════════════════════════════════════════════
 
 def build_parser() -> argparse.ArgumentParser:
@@ -405,21 +372,21 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  # 全量训练
+  # Train every selected model.
   python -m models.soh_ai.train
 
-  # 仅训练 LSTM
+  # Train only the LSTM.
   python -m models.soh_ai.train --model lstm --epochs 200
 
-  # 合成数据调试
+  # Debug with synthetic fixtures.
   python -m models.soh_ai.train --synthetic --model all
 
-  # 5-Fold 交叉验证
+  # Five-fold cross-validation.
   python -m models.soh_ai.train --kfold 5 --model lstm
         """
     )
 
-    # ── 数据参数 ──
+
     data = parser.add_argument_group('数据')
     data.add_argument('--synthetic', action='store_true',
                      help='使用合成数据（无真实数据时自动启用）')
@@ -439,14 +406,14 @@ def build_parser() -> argparse.ArgumentParser:
     data.add_argument('--syn-cycles', type=int, default=500,
                      help='每个合成电芯的循环数 (默认: 500)')
 
-    # ── 模型选择 ──
+
     model = parser.add_argument_group('模型选择')
     model.add_argument('--model', type=str, nargs='+',
                       choices=['all', 'xgb', 'lstm', 'transformer'],
                       default=['all'],
                       help='要训练的模型 (默认: all)')
 
-    # ── 训练超参数 ──
+
     train = parser.add_argument_group('训练超参数')
     train.add_argument('--epochs', type=int, default=None,
                       help='最大训练轮数 (覆盖配置默认值)')
@@ -465,7 +432,7 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument('--no-cuda', action='store_true',
                       help='强制使用 CPU 训练')
 
-    # ── 输出参数 ──
+
     output = parser.add_argument_group('输出')
     output.add_argument('--output-dir', type=str, default=None,
                        help='模型输出目录 (默认: models/weights/)')
@@ -481,11 +448,11 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    # 日志初始化
+
     log_file = setup_logging(args.log_dir, args.verbose)
     logger = logging.getLogger(__name__)
 
-    # 随机种子
+
     import numpy as np
     import torch
     np.random.seed(args.seed)
@@ -493,13 +460,13 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
-    # 强制 CPU
+
     if args.no_cuda:
         from models.soh_ai.config import TRAIN_CFG
         TRAIN_CFG.device = "cpu"
         logger.info("  强制使用 CPU 训练 (--no-cuda)")
 
-    # 运行训练
+
     try:
         exit_code = run_training(args)
     except KeyboardInterrupt:

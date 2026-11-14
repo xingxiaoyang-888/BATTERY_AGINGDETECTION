@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="300" viewBox="0 0 1280 300">
+  <defs><pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0V32" fill="none" stroke="#a6c68e" stroke-opacity=".07"/></pattern><linearGradient id="fade"><stop stop-color="#173e32"/><stop offset="1" stop-color="#315741"/></linearGradient></defs>
+  <rect width="1280" height="300" rx="20" fill="url(#fade)"/><rect width="1280" height="300" rx="20" fill="url(#grid)"/>
+  <rect x="55" y="52" width="42" height="47" rx="12" fill="none" stroke="#a6c68e"/><path d="m80 59-16 23h12l-3 11 17-24H78z" fill="#d9eea4"/>
+  <text x="114" y="84" font-family="Arial,sans-serif" font-size="22" letter-spacing="4" fill="#e2edcf">SODIUM TWIN</text>
+  <text x="55" y="165" font-family="Arial,sans-serif" font-size="44" letter-spacing="-1" fill="#f6f8ef">Battery intelligence,</text>
+  <text x="55" y="218" font-family="Arial,sans-serif" font-size="44" letter-spacing="-1" fill="#c6df9c">grounded in physics.</text>
+  <text x="58" y="263" font-family="Arial,sans-serif" font-size="12" letter-spacing="2" fill="#a5bea0">OBSERVE / UNDERSTAND / FORECAST</text>
+  <g fill="none" stroke-width="2"><path d="M740 95 C820 90 870 125 940 135 S1070 165 1215 203" stroke="#b7d495"/><path d="M940 135 C1050 148 1110 165 1215 175" stroke="#91b674" stroke-dasharray="5 5"/><path d="M940 135 C1050 174 1110 200 1215 244" stroke="#91b674" stroke-dasharray="5 5"/><path d="M740 246H1215M940 65V255" stroke="#b7d495" stroke-opacity=".2"/></g>
+  <circle cx="940" cy="135" r="5" fill="#d9eea4"/><text x="747" y="280" font-family="Arial,sans-serif" font-size="10" letter-spacing="2" fill="#a5bea0">HISTORY</text><text x="1110" y="280" font-family="Arial,sans-serif" font-size="10" letter-spacing="2" fill="#a5bea0">POSSIBILITY</text>
+</svg>

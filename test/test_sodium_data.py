@@ -1,4 +1,4 @@
-"""钠电数据加载、隔离和质量门禁测试。"""
+"""Test sodium data."""
 
 import tempfile
 import unittest
