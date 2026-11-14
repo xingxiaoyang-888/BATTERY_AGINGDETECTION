@@ -11,6 +11,7 @@ import random
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
+from safetensors.torch import save_file
 
 from ..data import FEATURES, parse_csv
 from .dataset import TrainScaler, make_windows, split_cells
@@ -122,7 +123,8 @@ def run(args):
     passed = evaluation["mae_pp"] < evaluation["persistence_mae_pp"]
     # Artifacts remain unavailable to the API unless they beat the held-out baseline.
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "weights_format": "safetensors",
         "status": "validated" if passed else "rejected",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "config": asdict(cfg),
@@ -141,8 +143,8 @@ def run(args):
         "eol_pct": args.eol_pct,
     }
     destination.mkdir(parents=True)
-    weights = destination / "weights.pt"
-    torch.save(best_state, weights)
+    weights = destination / "weights.safetensors"
+    save_file({name: value.contiguous() for name, value in best_state.items()}, str(weights))
     manifest["weights_sha256"] = hashlib.sha256(weights.read_bytes()).hexdigest()
     (destination / "manifest.json").write_text(
         json.dumps(manifest, indent=2, allow_nan=False), encoding="utf-8"

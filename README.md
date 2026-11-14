@@ -8,12 +8,12 @@
 
 A battery research platform connecting modern sequence models, uncertainty-aware forecasting, and Modelica digital twins through a polished web workspace.
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-35745b?style=flat-square)
+![Python](https://img.shields.io/badge/Python-3.11%2B-35745b?style=flat-square)
 ![React](https://img.shields.io/badge/React-19-35745b?style=flat-square)
 ![PyTorch](https://img.shields.io/badge/PyTorch-optional-35745b?style=flat-square)
 ![Research](https://img.shields.io/badge/Status-research_platform-bb9650?style=flat-square)
 
-[Quick start](#quick-start) · [Model card](docs/MODEL_CARD.md) · [Architecture](docs/ARCHITECTURE.md) · [Validation](docs/VALIDATION.md) · [Migration](docs/MIGRATION.md)
+[Quick start](#quick-start) · [Model card](docs/MODEL_CARD.md) · [Architecture](docs/ARCHITECTURE.md) · [Validation](docs/VALIDATION.md) · [Migration](docs/MIGRATION.md) · [Security](SECURITY.md)
 
 </div>
 
@@ -34,12 +34,12 @@ The initial workspace contains **clearly labeled synthetic data**. No new model 
 
 ## Quick start
 
-Requirements: Python 3.10+ and Node.js 20.19+ or 22.12+. Python 3.10 and Node.js 24 were used for local verification. Start from the repository root:
+Requirements: Python 3.11+ and Node.js 20.19+ or 22.12+. The security release was verified with Python 3.12 and Node.js 24. Start from the repository root:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -e ".[test]"
+python -m pip install -c constraints-security.txt -e ".[test]"
 cd web
 npm ci
 npm run build
@@ -47,13 +47,13 @@ cd ..
 python -m sodium_twin
 ```
 
-Open **[http://127.0.0.1:8000](http://127.0.0.1:8000)**. API documentation is at **[/docs](http://127.0.0.1:8000/docs)**. The compiled UI and API share one origin and one process. The default service binds to loopback and has no login or shared administrator credentials: it is a single-user local research workspace.
+Open **[http://127.0.0.1:8000](http://127.0.0.1:8000)**. API documentation is at **[/docs](http://127.0.0.1:8000/docs)**. The compiled UI and API share one origin and one process. The default service accepts loopback peers and trusted local hostnames only. Set `SODIUM_API_KEY` to protect a shared-machine workspace; non-loopback access requires this credential. Browser authentication uses username `workspace` and the configured key as the password; API clients may use a Bearer header. This is one shared operator workspace, not a multi-tenant account system.
 
 Alternatively, run `./scripts/start.ps1` on Windows or `bash scripts/start.sh` on Linux/macOS. These helpers create a local environment, install the application, build the UI, and launch it. They never start training.
 
-The review ZIP also includes `web/dist`. When using that archive, the existing compiled interface can run with just `python -m pip install -e .` followed by `python -m sodium_twin`; Node.js is only needed to rebuild the frontend. Local databases and dependency folders are excluded from the archive.
+The review ZIP also includes `web/dist`. When using that archive, the existing compiled interface can run with just `python -m pip install -c constraints-security.txt -e .` followed by `python -m sodium_twin`; Node.js is only needed to rebuild the frontend. Local databases and dependency folders are excluded from the archive.
 
-For frontend development, run `python -m sodium_twin` and `npm --prefix web run dev` in separate terminals. Vite proxies `/api` to port 8000. The UI does not depend on hosted services, external fonts, or paid inference APIs.
+For frontend development, set `SODIUM_DEV_MODE=1` in the API environment, then run `python -m sodium_twin` and `npm --prefix web run dev` in separate terminals. Vite proxies `/api` to port 8000. The UI does not depend on hosted services, external fonts, or paid inference APIs.
 
 ## Research models
 
@@ -72,7 +72,7 @@ These are battery-specific research implementations inspired by published work, 
 ### Prepare without training
 
 ```powershell
-python -m pip install -e ".[ml]"
+python -m pip install -c constraints-security.txt -e ".[ml]"
 python -m sodium_twin.ml.train --csv data/my_cycles.csv --architecture patchtst
 ```
 
@@ -107,7 +107,7 @@ python -m sodium_twin
 
 Choose **Modelica / FMU** in Digital twin. Runtime resolution checks `OPENMODELICA_BIN`, then `OPENMODELICAHOME/bin`, then `omc` on `PATH`. Compiled binaries must match the host. Files alone do not prove runtime readiness. Only 8S2P has been executed as a native integration check for this release; other topologies remain unverified.
 
-Legacy pickled thermal weights are no longer loaded automatically. Set `SODIUM_THERMAL_MODEL` only for a trusted artifact with compatible NumPy/scikit-learn versions. The old artifact failed compatibility checks locally and was not used.
+Legacy pickle loading is disabled by default, including scaler and XGBoost files. An operator must explicitly set `SODIUM_TRUST_LEGACY_ARTIFACTS=1` before loading a trusted legacy artifact; `SODIUM_THERMAL_MODEL` selects a thermal model with compatible numerical-library versions. The old artifact failed compatibility checks locally and was not used.
 
 ## Architecture
 
@@ -147,7 +147,7 @@ The old Streamlit/v1 workflow remains available for specialized spatial and faul
 ## Verification
 
 ```powershell
-python -m pip install -e ".[test,ml]"
+python -m pip install -c constraints-security.txt -e ".[test,ml]"
 python -m pytest tests -q
 # Additional dependencies for legacy regressions:
 python -m pip install -r requirements.txt
@@ -162,9 +162,9 @@ Tests cover input contracts, leakage prevention, ordered/monotonic outputs, grad
 
 `.env.example` documents supported variables. Variables are read from the process, not automatically from `.env`. `SODIUM_DATA_DIR` controls persistence; `SODIUM_MODEL_DIR` controls validated artifacts. Relative custom paths resolve against the working directory; defaults are repository-relative.
 
-`docker compose up --build` runs the portable platform on loopback port 8000 with persistent storage. The image excludes Windows FMUs and old research dependencies. Docker configuration is supplied but was not executed locally.
+Set a randomly generated `SODIUM_API_KEY` first; then `docker compose up --build` runs the portable platform on loopback port 8000 with persistent storage. The image excludes Windows FMUs and old research dependencies. Docker configuration is supplied but was not executed locally.
 
-Public/multi-user deployment requires authentication, authorization, quotas, durable native workers, and a storage/privacy design. This release is a research platform, not a certified BMS or validated battery safety system.
+Network deployment additionally requires TLS, explicit `SODIUM_ALLOWED_HOSTS`, and an operator-managed key. Multi-user deployment still requires separate identities, authorization, durable native workers, and a storage/privacy design. See [SECURITY.md](SECURITY.md) and the [review findings](docs/SECURITY_REVIEW.md). This release is a research platform, not a certified BMS or validated battery safety system.
 
 ## Attribution
 

@@ -1,6 +1,6 @@
 # Validation record
 
-Validation date: **2026-11-14**. This record describes checks actually performed on the local Windows environment. It does not report trained-model accuracy.
+Original v3.0.0 validation date: **2026-11-14**. The newer security release and runtime results are recorded in [SECURITY_REVIEW.md](SECURITY_REVIEW.md). This record describes checks actually performed on the local Windows environment. It does not report trained-model accuracy.
 
 ## Automated checks
 

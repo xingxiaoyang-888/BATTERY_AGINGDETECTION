@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from sodium_twin.legacy_artifacts import load_pickle_model
 import json
 import math
 import os
@@ -372,7 +373,7 @@ class SodiumLifetimePredictor:
             from .models import XGBoostWrapper
 
             self._ai_model = XGBoostWrapper.load(str(self.weights_dir / 'xgb_model.pkl'))
-            scalers = joblib.load(self.weights_dir / 'soh_scalers.pkl')
+            scalers = load_pickle_model(self.weights_dir / 'soh_scalers.pkl')
             self._ai_scaler = scalers['X']
             return True
         except Exception as exc:

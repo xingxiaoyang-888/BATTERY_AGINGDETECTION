@@ -1,4 +1,5 @@
 # models/simulation_engine.py
+from sodium_twin.legacy_artifacts import load_pickle_model
 import numpy as np
 import pandas as pd
 import os
@@ -23,7 +24,7 @@ class BatteryDigitalTwin:
         self.ai_compensator = None
         if ai_model_path and os.path.exists(ai_model_path):
             try:
-                self.ai_compensator = joblib.load(ai_model_path)
+                self.ai_compensator = load_pickle_model(ai_model_path)
                 logger.info(" 成功加载 AI 混合驱动权重")
             except Exception as e:
                 logger.error(f" 加载 AI 模型失败: {e}")

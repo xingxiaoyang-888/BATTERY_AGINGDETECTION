@@ -28,6 +28,8 @@ def _request(method: str, path: str, payload=None, timeout=30.0):
             f"{API_BASE}{path}",
             json=payload,
             timeout=timeout,
+            headers=api_headers(),
+            allow_redirects=False,
         )
     except requests.RequestException as exc:
         raise BackendAPIError(f"无法连接后端服务：{exc}") from exc
@@ -41,3 +43,9 @@ def _request(method: str, path: str, payload=None, timeout=30.0):
         return response.json()
     except ValueError as exc:
         raise BackendAPIError("后端响应不是有效JSON") from exc
+
+
+def api_headers():
+    """Send the operator-configured credential only to the configured backend."""
+    key = os.getenv("SODIUM_API_KEY")
+    return {"Authorization": f"Bearer {key}"} if key else {}

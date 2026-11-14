@@ -2,6 +2,8 @@
 
 import numpy as np
 import torch
+import hashlib
+from safetensors.torch import load as load_tensors
 from ..data import FEATURES
 from ..registry import inspect_artifact
 from .dataset import TrainScaler
@@ -50,9 +52,13 @@ def learned_forecast(frame, request, dataset, model_dir):
             + ". Use the explicit baseline or collect calibration data."
         )
     model = BatteryForecaster(cfg)
-    model.load_state_dict(
-        torch.load(directory / "weights.pt", map_location="cpu", weights_only=True)
-    )
+    payload = (directory / "weights.safetensors").read_bytes()
+    if hashlib.sha256(payload).hexdigest() != manifest["weights_sha256"]:
+        raise ValueError("Model weight checksum changed before inference.")
+    state = load_tensors(payload)
+    if any(not torch.isfinite(value).all() for value in state.values()):
+        raise ValueError("Model weights must be finite.")
+    model.load_state_dict(state)
     model.eval()
     with torch.inference_mode():
         prediction = model(

@@ -13,7 +13,7 @@ st.set_page_config(
 )
 
 from config.settings import apply_custom_css
-from utils.db_manager import init_db
+from utils.db_manager import init_db, session_valid
 from views.dashboard_view import render_dashboard
 from views.login_view import render_login
 
@@ -24,6 +24,12 @@ apply_custom_css()
 st.session_state.setdefault("logged_in", False)
 st.session_state.setdefault("username", "")
 st.session_state.setdefault("workspace_page", "运行总览")
+
+if st.session_state["logged_in"] and not session_valid(
+    st.session_state["username"], st.session_state.get("credential_revision")
+):
+    st.session_state["logged_in"] = False
+    st.session_state.pop("sim_result", None)
 
 if st.session_state["logged_in"]:
     render_dashboard()

@@ -4,6 +4,8 @@ import os
 
 import requests
 import streamlit as st
+from html import escape
+from utils.api_client import api_headers
 
 API_BASE = os.getenv("BATTERY_API_BASE", "http://localhost:8000")
 
@@ -12,8 +14,8 @@ API_BASE = os.getenv("BATTERY_API_BASE", "http://localhost:8000")
 def fetch_backend_state():
     state = {"online": False, "health": None, "fmus": None}
     try:
-        health = requests.get(f"{API_BASE}/api/v1/health", timeout=2.5)
-        configs = requests.get(f"{API_BASE}/api/v1/fmu/configurations", timeout=3)
+        health = requests.get(f"{API_BASE}/api/v1/health", timeout=2.5, headers=api_headers(), allow_redirects=False)
+        configs = requests.get(f"{API_BASE}/api/v1/fmu/configurations", timeout=3, headers=api_headers(), allow_redirects=False)
         if health.ok:
             state["online"] = True
             state["health"] = health.json()
@@ -41,7 +43,7 @@ def render_sidebar(show_simulation_controls=True):
         status_text = "BACKEND ONLINE" if backend["online"] else "BACKEND OFFLINE"
         st.markdown(
             f'<div class="sidebar-status"><i class="status-dot {status_class}"></i>{status_text}'
-            f'<span>{API_BASE.replace("http://", "")}</span></div>',
+            f'<span>{escape(API_BASE.replace("http://", ""))}</span></div>',
             unsafe_allow_html=True,
         )
 

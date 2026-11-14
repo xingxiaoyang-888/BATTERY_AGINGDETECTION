@@ -9,7 +9,7 @@ from sodium_twin.config import Settings
 @pytest.fixture
 def client(tmp_path):
     app = create_app(Settings(tmp_path / "data", tmp_path / "models", tmp_path / "web"))
-    with TestClient(app) as test_client:
+    with TestClient(app, base_url="http://localhost", client=("127.0.0.1", 50000)) as test_client:
         yield test_client
 
 

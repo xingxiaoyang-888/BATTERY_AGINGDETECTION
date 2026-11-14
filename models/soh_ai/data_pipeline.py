@@ -1,6 +1,7 @@
 # models/soh_ai/data_pipeline.py
 """Causal feature extraction and cell-separated data preparation."""
 
+from sodium_twin.legacy_artifacts import load_pickle_model
 import os
 import json
 import logging
@@ -877,7 +878,7 @@ class SOHDataPipeline:
             if not np.isfinite(values).all():
                 raise ValueError(f"{name} 划分包含 NaN 或无穷值")
 
-        scalers = joblib.load(scaler_path)
+        scalers = load_pickle_model(scaler_path)
         if not isinstance(scalers, dict) or scalers.get('X') is None:
             raise ValueError(f"标准化器格式无效: {scaler_path}")
         scale_cols = [column for column in feature_cols if column != FEATURE_CFG.target_col]

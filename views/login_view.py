@@ -1,10 +1,11 @@
 """Login view."""
 
 import time
+import os
 
 import streamlit as st
 
-from utils.db_manager import register_user, verify_user
+from utils.db_manager import credential_revision, register_user, verify_user
 
 
 def render_login():
@@ -76,6 +77,7 @@ def render_login():
                     if verify_user(username.strip(), password):
                         st.session_state["logged_in"] = True
                         st.session_state["username"] = username.strip()
+                        st.session_state["credential_revision"] = credential_revision(username.strip())
                         st.success("身份验证通过，正在载入工作区。")
                         time.sleep(0.3)
                         st.rerun()
@@ -83,11 +85,14 @@ def render_login():
                         st.error("账户或密码错误，请重新输入。")
 
         with register_tab:
+            registration_enabled = os.getenv("SODIUM_ALLOW_REGISTRATION") == "1"
+            if not registration_enabled:
+                st.info("Self-registration is disabled. Contact the local workspace operator.")
             with st.form("register_form", border=False):
                 new_user = st.text_input("新账户名称", placeholder="至少3个字符")
                 new_password = st.text_input("设置密码", type="password", placeholder="12–72 UTF-8 bytes")
                 confirmed = st.text_input("确认密码", type="password", placeholder="再次输入密码")
-                submitted = st.form_submit_button("创建工程账户", use_container_width=True)
+                submitted = st.form_submit_button("创建工程账户", use_container_width=True, disabled=not registration_enabled)
                 if submitted:
                     if len(new_user.strip()) < 3 or not 12 <= len(new_password.encode("utf-8")) <= 72:
                         st.warning("账户至少3个字符，密码12–72 UTF-8 bytes。")
@@ -103,7 +108,7 @@ def render_login():
         st.markdown(
             """
             <div class="auth-footer">
-                <span><i class="status-dot online"></i> Local secure storage</span>
+                <span><i class="status-dot online"></i> Local workspace storage</span>
                 <span>Version 3.0 · Engineering Preview</span>
             </div>
             """,

@@ -8,7 +8,7 @@ Base revision: `ddd6e97` from `xingxiaoyang-888/BATTERY_AGINGDETECTION`. The mod
 | Monolithic v1 service | Separate v2 package with explicit contracts and factory configuration |
 | Native work directly inside an async handler | Thread-pool offload and serialized native access |
 | Fixed OpenModelica drive path | Environment/PATH runtime discovery |
-| Automatic legacy thermal pickle loading | Opt-in `SODIUM_THERMAL_MODEL` |
+| Automatic legacy thermal pickle loading | Explicit artifact trust plus `SODIUM_THERMAL_MODEL` |
 | Default `admin / 1234` provisioning | No default password; explicit environment provisioning only |
 | Tracked local database and bytecode | Removed from the current tree; generated files ignored |
 | Missing sodium artifacts treated as an external prerequisite | Explicit synthetic workspace and missing-artifact model state |
@@ -18,8 +18,12 @@ Run the new application with `python -m sodium_twin`. Keep `python server.py` an
 
 The old `.db` is not migrated into the new workspace. Existing user data should be backed up independently before any future migration. The checked-in historical database is removed from this revision, not retroactively erased from Git history.
 
-To provision a legacy administrator, set `SODIUM_ADMIN_USER` and `SODIUM_ADMIN_PASSWORD` before initialization. Passwords must be 12–72 UTF-8 bytes. Old accounts in an existing external database are not changed automatically. The new local research console has no account system and must remain loopback/private.
+To provision a legacy administrator, set `SODIUM_ADMIN_USER` and `SODIUM_ADMIN_PASSWORD` before initialization. Passwords must be 12–72 UTF-8 bytes. Existing records are preserved, but weak credentials and password hashes disclosed in the historical database cannot authenticate. Self-registration is disabled by default. Use `python -m utils.account_admin admin` to rotate an existing legacy password; the prompt does not echo it or put it in shell history. Password changes invalidate previous Streamlit sessions on their next interaction. The new console uses a separate optional operator API key, not these legacy accounts.
 
 The old sodium-only cohort artifacts were absent in the repository. Set `SODIUM_LIFETIME_FEATURE_PATH` after recovering the audited feature table. Do not substitute mixed-chemistry historical data. Native FMUs and Modelica equations are retained; this release does not claim a new electrochemical calibration.
 
 Legacy comment cleanup was checked against executable Python ASTs with docstrings excluded. Explicit concurrency/configuration fixes are separately covered by regression tests. Original source remains recoverable from Git history.
+
+## Security release 3.0.1
+
+Python 3.11+ is now required to install patched dependencies. Recreate any Python 3.10 virtual environment rather than reusing it. Apply `constraints-security.txt` when installing the legacy dependency set. New learned artifacts use manifest schema 2 and `weights.safetensors`; pickle-based v1 manifests do not activate. No new trained artifacts existed when this format changed. Read [SECURITY.md](../SECURITY.md) before enabling network access or legacy deserialization.

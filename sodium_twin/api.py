@@ -19,6 +19,8 @@ from .registry import model_registry
 from .schemas import ForecastRequest, ImportRequest, SimulationRequest
 from .simulation import simulate
 from .store import Store
+from .database import StorageLimitError
+from .security import WorkspaceBoundary
 
 logger = logging.getLogger(__name__)
 
@@ -32,27 +34,11 @@ def create_app(settings: Settings | None = None):
         description="A local workspace for battery health, forecasting, and simulation.",
     )
     app.state.store = store
+    app.add_middleware(WorkspaceBoundary, policy=settings.access)
 
     @app.middleware("http")
     async def request_context(request: Request, call_next):
         request_id, start = uuid4().hex, time.perf_counter()
-        # Restrict browser mutations to this origin without blocking CLI clients.
-        origin = request.headers.get("origin")
-        allowed = {
-            str(request.base_url).rstrip("/"),
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-        }
-        if request.method not in {"GET", "HEAD", "OPTIONS"} and origin and origin not in allowed:
-            return JSONResponse({"detail": "Cross-origin writes are disabled."}, status_code=403)
-        try:
-            length = int(request.headers.get("content-length", "0") or 0)
-        except ValueError:
-            return JSONResponse({"detail": "Invalid Content-Length header."}, status_code=400)
-        if length > 2_100_000:
-            return JSONResponse(
-                {"detail": "Request exceeds the 2 MB import limit."}, status_code=413
-            )
         response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
         response.headers["Server-Timing"] = f"app;dur={(time.perf_counter() - start) * 1000:.2f}"
@@ -75,6 +61,10 @@ def create_app(settings: Settings | None = None):
     @app.exception_handler(ValueError)
     async def invalid_input(_request, exc):
         return JSONResponse({"detail": str(exc)}, status_code=422)
+
+    @app.exception_handler(StorageLimitError)
+    async def storage_full(_request, exc):
+        return JSONResponse({"detail": str(exc)}, status_code=507)
 
     @app.exception_handler(KeyError)
     async def missing(_request, exc):

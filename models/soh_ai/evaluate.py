@@ -1,6 +1,7 @@
 # models/soh_ai/evaluate.py
 """Legacy model metrics and diagnostic figures."""
 
+from sodium_twin.legacy_artifacts import load_pickle_model, load_tensor_checkpoint, load_numpy_archive
 import os
 import sys
 import json
@@ -80,11 +81,11 @@ class RolloutScenario:
             df = pd.read_parquet(path_obj)
             return cls(**{col: df[col].to_numpy(dtype=np.float32) for col in df.columns})
         if suffix == '.npz':
-            archive = np.load(path_obj, allow_pickle=True)
+            archive = load_numpy_archive(path_obj, allow_pickle=True)
             payload = {key: archive[key] for key in archive.files}
             return cls(**payload)
         if suffix == '.npy':
-            loaded = np.load(path_obj, allow_pickle=True)
+            loaded = load_numpy_archive(path_obj, allow_pickle=True)
             if isinstance(loaded, np.ndarray) and loaded.dtype == object:
                 return cls(**loaded.item())
             raise ValueError('npy ????????? dict ??')
@@ -724,9 +725,9 @@ class ModelEvaluator:
             path_obj = Path(window_data)
             suffix = path_obj.suffix.lower()
             if suffix == '.npy':
-                window = np.load(path_obj).astype(np.float32)
+                window = load_numpy_archive(path_obj).astype(np.float32)
             elif suffix == '.npz':
-                archive = np.load(path_obj)
+                archive = load_numpy_archive(path_obj)
                 if 'window' in archive:
                     window = archive['window'].astype(np.float32)
                 elif 'x' in archive:
@@ -844,7 +845,7 @@ class ModelEvaluator:
         scaler_path = Path(weights_dir or WEIGHTS_DIR) / 'soh_scalers.pkl'
         if scaler_path.exists():
             import joblib
-            scalers = joblib.load(scaler_path)
+            scalers = load_pickle_model(scaler_path)
             return scalers.get('X', None)
         return None
 
@@ -977,7 +978,7 @@ class ModelEvaluator:
 
             best_path = lstm_path.parent / 'checkpoints' / 'lstm_attention_best.pt'
             load_path = best_path if best_path.exists() else lstm_path
-            lstm_state = torch.load(str(load_path), map_location='cpu', weights_only=True)
+            lstm_state = load_tensor_checkpoint(str(load_path), map_location='cpu', weights_only=True)
 
             if 'model_state_dict' in lstm_state:
                 lstm_state = lstm_state['model_state_dict']
@@ -987,7 +988,7 @@ class ModelEvaluator:
             m.eval()
             ensemble.register('lstm', m)
         if tf_path.exists():
-            tf_state = torch.load(str(tf_path), map_location='cpu', weights_only=True)
+            tf_state = load_tensor_checkpoint(str(tf_path), map_location='cpu', weights_only=True)
             tf_input_dim = evaluator._infer_input_dim(tf_state, len(ACTUAL_FEATURE_COLUMNS))
             m = TemporalTransformer(input_dim=tf_input_dim)
             m.load_state_dict(tf_state)
@@ -1060,7 +1061,7 @@ def main():
     if args.test_data:
         test_path = Path(args.test_data)
         if test_path.suffix.lower() == '.npy':
-            data = np.load(test_path, allow_pickle=True)
+            data = load_numpy_archive(test_path, allow_pickle=True)
             if isinstance(data, np.ndarray) and data.dtype == object and len(data) >= 2:
                 test_data = (data[0], data[1])
             else:

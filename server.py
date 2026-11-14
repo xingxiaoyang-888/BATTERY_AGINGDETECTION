@@ -1,5 +1,7 @@
 # server.py
 from fastapi import FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing import List, Optional, Dict, Any
 import time
@@ -7,6 +9,7 @@ import os
 import threading
 import uvicorn
 from starlette.concurrency import run_in_threadpool
+from sodium_twin.security import AccessPolicy, WorkspaceBoundary, require_safe_bind
 
 
 from models.simulation_engine import BatteryDigitalTwin
@@ -22,6 +25,16 @@ app = FastAPI(
     description="基于 FMI 与 AI 双轨驱动的钠离子电池孪生平台后端",
     version="2.0.0",
 )
+app.add_middleware(WorkspaceBoundary, policy=AccessPolicy.from_env())
+
+
+@app.exception_handler(RequestValidationError)
+async def invalid_contract(_request, exc):
+    return JSONResponse(
+        {"detail": [{"loc": list(error["loc"]), "msg": error["msg"]} for error in exc.errors()]},
+        status_code=422,
+    )
+
 
 # ==========================================
 
@@ -393,4 +406,6 @@ async def fast_aging_scan(soh: float, temp: float, rate: float):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host=os.getenv("SODIUM_HOST", "127.0.0.1"), port=8000)
+    host = os.getenv("SODIUM_HOST", "127.0.0.1")
+    require_safe_bind(host, AccessPolicy.from_env())
+    uvicorn.run(app, host=host, port=8000, limit_concurrency=32, timeout_keep_alive=5)

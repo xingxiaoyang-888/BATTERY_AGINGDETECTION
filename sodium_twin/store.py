@@ -1,19 +1,20 @@
 """Small durable local workspace; no shared default account or external service."""
 
-from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-import sqlite3
 from uuid import uuid4
 import pandas as pd
 
 from .data import demo_frame, summarize
+from .database import connect_database, StorageLimitError
 
 
 class Store:
-    def __init__(self, directory: Path):
-        directory.mkdir(parents=True, exist_ok=True)
+    def __init__(
+        self, directory: Path, *, max_datasets=50, max_runs=1000, max_bytes=256 * 1024 * 1024
+    ):
+        self.max_datasets, self.max_runs, self.max_bytes = max_datasets, max_runs, max_bytes
         self.path = directory / "workspace.sqlite3"
         with self.connect() as db:
             db.executescript("""
@@ -43,20 +44,15 @@ class Store:
     def now():
         return datetime.now(timezone.utc).isoformat()
 
-    @contextmanager
     def connect(self):
-        db = sqlite3.connect(self.path, timeout=15)
-        db.row_factory = sqlite3.Row
-        try:
-            with db:
-                yield db
-        finally:
-            db.close()
+        return connect_database(self.path, self.max_bytes)
 
     def datasets(self):
         with self.connect() as db:
-            rows = db.execute("SELECT * FROM datasets ORDER BY created_at DESC").fetchall()
-        return [self._dataset(row) for row in rows]
+            return [
+                self._dataset(row)
+                for row in db.execute("SELECT * FROM datasets ORDER BY created_at DESC")
+            ]
 
     @staticmethod
     def _dataset(row):
@@ -74,6 +70,11 @@ class Store:
     def import_frame(self, name, chemistry, frame):
         dataset_id = uuid4().hex
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT count(*) FROM datasets").fetchone()[0] >= self.max_datasets:
+                raise StorageLimitError(
+                    "Dataset limit reached. Archive workspace data before importing more."
+                )
             db.execute(
                 "INSERT INTO datasets VALUES (?,?,?,?,?,?)",
                 (
@@ -90,6 +91,11 @@ class Store:
     def save_run(self, kind, request, result):
         run_id, created = uuid4().hex, self.now()
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT count(*) FROM runs").fetchone()[0] >= self.max_runs:
+                raise StorageLimitError(
+                    "Run limit reached. Archive workspace data before creating more runs."
+                )
             db.execute(
                 "INSERT INTO runs VALUES (?,?,?,?,?)",
                 (

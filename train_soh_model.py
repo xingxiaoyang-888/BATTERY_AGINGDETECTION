@@ -2,6 +2,7 @@
 # train_soh_model.py
 """Train soh model."""
 
+from sodium_twin.legacy_artifacts import load_pickle_model
 import sys
 import os
 import argparse
@@ -108,7 +109,7 @@ def train_models(result=None, transfer: bool = False):
             if os.path.exists(path):
                 splits[name] = pd.read_parquet(path)
 
-        scalers = joblib.load(os.path.join(WEIGHTS_DIR, 'soh_scalers.pkl'))
+        scalers = load_pickle_model(os.path.join(WEIGHTS_DIR, 'soh_scalers.pkl'))
 
         with open(os.path.join(PROCESSED_DATA_DIR, 'feature_columns.json'), 'r') as f:
             feature_cols = json.load(f)

@@ -135,3 +135,4 @@ def test_dry_run_never_steps_optimizer_or_creates_weights(tmp_path, monkeypatch)
     assert result["optimizer_steps"] == 0
     assert result["mode"] == "dry-run"
     assert not list(tmp_path.rglob("*.pt"))
+    assert not list(tmp_path.rglob("*.safetensors"))

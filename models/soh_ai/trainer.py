@@ -1,6 +1,7 @@
 # models/soh_ai/trainer.py
 """Trainer."""
 
+from sodium_twin.legacy_artifacts import load_tensor_checkpoint
 import os
 import sys
 import time
@@ -346,7 +347,7 @@ class BaseTrainer:
 
     def _load_checkpoint(self, filepath: str) -> Tuple[nn.Module, any, any, TrainingHistory, int]:
         """Load checkpoint."""
-        checkpoint = torch.load(filepath, map_location=self.device, weights_only=True)
+        checkpoint = load_tensor_checkpoint(filepath, map_location=self.device, weights_only=True)
         model = self._create_model().to(self.device)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer = self._create_optimizer(model)
@@ -370,7 +371,7 @@ class BaseTrainer:
     def load_model(self, filepath: str) -> nn.Module:
         """Load model."""
         self._model = self._create_model().to(self.device)
-        self._model.load_state_dict(torch.load(filepath, map_location=self.device, weights_only=True))
+        self._model.load_state_dict(load_tensor_checkpoint(filepath, map_location=self.device, weights_only=True))
         self._model.eval()
         logger.info(f"  模型权重已从 {filepath} 加载")
         return self._model

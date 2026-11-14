@@ -2,6 +2,8 @@
 
 import tempfile
 import unittest
+from unittest.mock import patch
+import os
 import json
 from pathlib import Path
 
@@ -29,16 +31,19 @@ from utils.soh_data_loader import (
 class TestWenzhouSodiumConversion(unittest.TestCase):
     def test_duration_and_unit_conversion(self):
         self.assertAlmostEqual(_duration_to_hours("2:00:00"), 2.0)
-        cycle = WenzhouDataLoader()._excel_dict_to_cycle({
-            "cycle_index": 1,
-            "charge_capacity_ah": 1.10,
-            "discharge_capacity_ah": 1.08,
-            "coulombic_efficiency": 98.2,
-            "charge_time": "2:00:00",
-            "discharge_time": "1:30:00",
-            "dc_resistance": 55.0,
-            "temperature_c": 0.0,
-        }, 0)
+        cycle = WenzhouDataLoader()._excel_dict_to_cycle(
+            {
+                "cycle_index": 1,
+                "charge_capacity_ah": 1.10,
+                "discharge_capacity_ah": 1.08,
+                "coulombic_efficiency": 98.2,
+                "charge_time": "2:00:00",
+                "discharge_time": "1:30:00",
+                "dc_resistance": 55.0,
+                "temperature_c": 0.0,
+            },
+            0,
+        )
 
         self.assertAlmostEqual(cycle.discharge_capacity_ah, 1.08)
         self.assertAlmostEqual(cycle.coulombic_efficiency, 0.982)
@@ -52,14 +57,20 @@ class TestMendeleyNFMLoader(unittest.TestCase):
     @staticmethod
     def _write_workbook(path: Path, capacity: float):
         voltages = [2.0, 2.5, 3.0, 3.5, 4.0]
-        discharge = pd.DataFrame([
-            [0.0, 0.25 * capacity, 0.55 * capacity, 0.8 * capacity, capacity],
-            [0.0, 0.24 * capacity, 0.53 * capacity, 0.78 * capacity, 0.98 * capacity],
-        ], columns=voltages)
-        charge = pd.DataFrame([
-            [0.0, 0.2 * capacity, 0.5 * capacity, 0.82 * capacity, 1.01 * capacity],
-            [0.0, 0.2 * capacity, 0.49 * capacity, 0.80 * capacity, capacity],
-        ], columns=voltages)
+        discharge = pd.DataFrame(
+            [
+                [0.0, 0.25 * capacity, 0.55 * capacity, 0.8 * capacity, capacity],
+                [0.0, 0.24 * capacity, 0.53 * capacity, 0.78 * capacity, 0.98 * capacity],
+            ],
+            columns=voltages,
+        )
+        charge = pd.DataFrame(
+            [
+                [0.0, 0.2 * capacity, 0.5 * capacity, 0.82 * capacity, 1.01 * capacity],
+                [0.0, 0.2 * capacity, 0.49 * capacity, 0.80 * capacity, capacity],
+            ],
+            columns=voltages,
+        )
         with pd.ExcelWriter(path, engine="openpyxl") as writer:
             discharge.to_excel(writer, sheet_name="Discharge", index=False)
             charge.to_excel(writer, sheet_name="Charge", index=False)
@@ -77,9 +88,7 @@ class TestMendeleyNFMLoader(unittest.TestCase):
         self.assertTrue(all(cell.chemistry == "sodium-ion" for cell in cells))
         self.assertTrue(all(len(cell.cycles) == 2 for cell in cells))
         self.assertGreater(cells[0].cycles[0].mean_discharge_voltage_v, 2.0)
-        self.assertAlmostEqual(
-            cells[0].cycles[0].coulombic_efficiency, 1.0 / 1.01, places=6
-        )
+        self.assertAlmostEqual(cells[0].cycles[0].coulombic_efficiency, 1.0 / 1.01, places=6)
 
 
 class TestSodiumIsolation(unittest.TestCase):
@@ -91,34 +100,35 @@ class TestSodiumIsolation(unittest.TestCase):
             for split_index, name in enumerate(("train", "val", "test")):
                 rows = []
                 for cycle_index in range(40):
-                    rows.append({
-                        "cell_id": f"{name}-cell",
-                        "chemistry": "sodium-ion",
-                        "dataset_id": "fixture",
-                        "condition": "fixture",
-                        "cycle_index": cycle_index + 1,
-                        "soh": 1.0 - 0.001 * cycle_index,
-                        "temperature_c": 20.0 + split_index,
-                        "c_rate_charge": 1.0,
-                    })
+                    rows.append(
+                        {
+                            "cell_id": f"{name}-cell",
+                            "chemistry": "sodium-ion",
+                            "dataset_id": "fixture",
+                            "condition": "fixture",
+                            "cycle_index": cycle_index + 1,
+                            "soh": 1.0 - 0.001 * cycle_index,
+                            "temperature_c": 20.0 + split_index,
+                            "c_rate_charge": 1.0,
+                        }
+                    )
                 frames[name] = pd.DataFrame(rows)
                 frames[name].to_parquet(root / f"{name}.parquet", index=False)
 
             pd.concat(frames.values(), ignore_index=True).to_parquet(
                 root / "feature_table.parquet", index=False
             )
-            (root / "feature_columns.json").write_text(
-                json.dumps(feature_cols), encoding="utf-8"
-            )
+            (root / "feature_columns.json").write_text(json.dumps(feature_cols), encoding="utf-8")
             scaler = RobustScaler(quantile_range=(5, 95)).fit(
                 frames["train"][["temperature_c", "c_rate_charge"]].values
             )
             scaler_path = root / "soh_scalers.pkl"
             joblib.dump({"X": scaler, "y": None}, scaler_path)
 
-            restored = SOHDataPipeline().load_processed(
-                root, scaler_path=scaler_path, lookback=32, horizon=1
-            )
+            with patch.dict(os.environ, {"SODIUM_TRUST_LEGACY_ARTIFACTS": "1"}):
+                restored = SOHDataPipeline().load_processed(
+                    root, scaler_path=scaler_path, lookback=32, horizon=1
+                )
 
         self.assertEqual(restored["feature_cols"], feature_cols)
         self.assertEqual(restored["sequences"]["train"][0].shape, (8, 32, 3))
@@ -155,8 +165,8 @@ class TestSodiumIsolation(unittest.TestCase):
         changed_smoothed = cleaner._smooth_soh(changed_future, window=5)
 
         pd.testing.assert_series_equal(
-            normal_smoothed.iloc[:len(prefix)],
-            changed_smoothed.iloc[:len(prefix)],
+            normal_smoothed.iloc[: len(prefix)],
+            changed_smoothed.iloc[: len(prefix)],
         )
 
     def test_plain_pipeline_rejects_lithium_cell(self):
@@ -164,8 +174,7 @@ class TestSodiumIsolation(unittest.TestCase):
             cell_id="li-1",
             chemistry="lithium-ion",
             nominal_capacity_ah=1.0,
-            cycles=[CycleData(cycle_index=idx + 1, discharge_capacity_ah=1.0)
-                    for idx in range(40)],
+            cycles=[CycleData(cycle_index=idx + 1, discharge_capacity_ah=1.0) for idx in range(40)],
         )
         with self.assertRaisesRegex(ValueError, "混入非钠电"):
             SOHDataPipeline().run([lithium], save=False)
@@ -174,11 +183,13 @@ class TestSodiumIsolation(unittest.TestCase):
         rows = []
         for cell_index in range(6):
             for cycle_index in range(40):
-                rows.append({
-                    "cell_id": f"cell-{cell_index}",
-                    "cycle_index": cycle_index + 1,
-                    "soh": 1.0 - cycle_index * 0.001,
-                })
+                rows.append(
+                    {
+                        "cell_id": f"cell-{cell_index}",
+                        "cycle_index": cycle_index + 1,
+                        "soh": 1.0 - cycle_index * 0.001,
+                    }
+                )
         splits = DataSplitter().split(pd.DataFrame(rows))
         cell_sets = [set(splits[name]["cell_id"].unique()) for name in ("train", "val", "test")]
         self.assertFalse(cell_sets[0] & cell_sets[1])
@@ -189,11 +200,13 @@ class TestSodiumIsolation(unittest.TestCase):
         rows = []
         for cell_index in range(20):
             for cycle_index in range(40):
-                rows.append({
-                    "cell_id": f"cell-{cell_index}",
-                    "cycle_index": cycle_index + 1,
-                    "soh": 1.0 - cycle_index * 0.001,
-                })
+                rows.append(
+                    {
+                        "cell_id": f"cell-{cell_index}",
+                        "cycle_index": cycle_index + 1,
+                        "soh": 1.0 - cycle_index * 0.001,
+                    }
+                )
         splits = DataSplitter().split(pd.DataFrame(rows))
         counts = {name: frame["cell_id"].nunique() for name, frame in splits.items()}
 
@@ -203,8 +216,10 @@ class TestSodiumIsolation(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp, "S2000TEST_CU_at25degC_V00.ird")
             rows = [
-                "Cellname: ' NA18650-1250\n", "Starttime: '2023-01-01 00:00:00'\n",
-                "###\n", "Time,Voltage,Current,Ah_counter,Temperature,StepID\n",
+                "Cellname: ' NA18650-1250\n",
+                "Starttime: '2023-01-01 00:00:00'\n",
+                "###\n",
+                "Time,Voltage,Current,Ah_counter,Temperature,StepID\n",
                 "0 days 00:00:00,3.8,-0.6,1.2,25,1\n",
                 "0 days 01:00:00,2.8,-0.6,0.6,25,1\n",
                 "0 days 02:00:00,1.5,-0.6,0.0,25,1\n",
@@ -268,14 +283,16 @@ class TestSodiumIsolation(unittest.TestCase):
         self.assertAlmostEqual(cycles[0].discharge_capacity_ah, 1.2)
 
     def test_rwth_high_rate_voltage_sag_is_not_rejected(self):
-        frame = pd.DataFrame({
-            "Time": pd.to_timedelta([0.0, 0.1], unit="h"),
-            "Voltage": [3.38, 1.5],
-            "Current": [-9.6, -9.6],
-            "Ah_counter": [1.1, 0.0],
-            "Temperature": [25.0, 25.0],
-            "StepID": [1, 1],
-        })
+        frame = pd.DataFrame(
+            {
+                "Time": pd.to_timedelta([0.0, 0.1], unit="h"),
+                "Voltage": [3.38, 1.5],
+                "Current": [-9.6, -9.6],
+                "Ah_counter": [1.1, 0.0],
+                "Temperature": [25.0, 25.0],
+                "StepID": [1, 1],
+            }
+        )
         cycles = RWTHCommercialAgingLoader._cycles_from_measurement(
             frame,
             "DOD100_5C8C_RT",
@@ -294,23 +311,25 @@ class TestSodiumAudit(unittest.TestCase):
             pd.Series([1.0, 0.9]).to_numpy(),
             pd.Series([0.99, 0.88]).to_numpy(),
         )
-        self.assertAlmostEqual(report["rmse"], (0.00025 ** 0.5))
+        self.assertAlmostEqual(report["rmse"], (0.00025**0.5))
         self.assertAlmostEqual(report["mae"], 0.015)
 
     def test_valid_sodium_feature_table_passes(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "feature_table.parquet"
-            pd.DataFrame({
-                "cell_id": ["a", "b", "c"],
-                "chemistry": ["sodium-ion"] * 3,
-                "dataset_id": ["fixture"] * 3,
-                "soh": [1.0, 0.9, 0.8],
-                "coulombic_efficiency": [1.0, 0.99, 1.01],
-                "c_rate_charge": [1.0] * 3,
-                "c_rate_discharge": [1.0] * 3,
-                "temperature_c": [25.0] * 3,
-                "nominal_capacity_ah": [1.2] * 3,
-            }).to_parquet(path, index=False)
+            pd.DataFrame(
+                {
+                    "cell_id": ["a", "b", "c"],
+                    "chemistry": ["sodium-ion"] * 3,
+                    "dataset_id": ["fixture"] * 3,
+                    "soh": [1.0, 0.9, 0.8],
+                    "coulombic_efficiency": [1.0, 0.99, 1.01],
+                    "c_rate_charge": [1.0] * 3,
+                    "c_rate_discharge": [1.0] * 3,
+                    "temperature_c": [25.0] * 3,
+                    "nominal_capacity_ah": [1.2] * 3,
+                }
+            ).to_parquet(path, index=False)
 
             report = audit_feature_table(path)
 

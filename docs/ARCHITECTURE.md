@@ -23,7 +23,7 @@ SQLite stores validated observations and immutable run records. Connections are 
 | GET | `/api/v2/runs/{id}` | Full JSON export |
 | GET | `/api/v2/runs/{id}/export.csv` | Portable/forecast trajectory export |
 
-The native adapter preserves the old structured JSON response and does not expose a v2 trajectory CSV. Browser writes reject unrelated origins. Request IDs and timing headers support diagnosis. Pydantic rejects unknown fields and non-finite values.
+The native adapter preserves the old structured JSON response and does not expose a v2 trajectory CSV. Both API generations reject untrusted Host headers, non-loopback peers without configured authentication, and cross-origin browser requests. Request bodies are bounded by actual streamed bytes and deadlines, independently of Content-Length. Request IDs and timing headers support diagnosis. Pydantic rejects unknown fields and non-finite values.
 
 ## Concurrency and native runtime
 
@@ -39,4 +39,4 @@ Legacy `aging_algorithm.py` and `physics_lib.py` contain lithium-ion approximati
 
 ## Production work remaining
 
-Authentication, authorization, multi-tenancy, quotas, durable workers, storage migrations, and a privacy policy are outside this local release. Container port publication is loopback-only. Do not expose the unauthenticated local API directly to the public internet.
+Single-operator authentication, request limits, and database quotas are implemented. Per-user authorization, multi-tenancy, durable workers, formal storage migrations, and a privacy policy remain outside this local release. Container port publication is loopback-only. Network binding requires a key; use TLS and explicit allowed hostnames. Local mode trusts other loopback clients, so enable a key on shared computers. SQLite is not encrypted at rest.

@@ -1,6 +1,7 @@
 # models/soh_ai/models.py
 """Legacy XGBoost, recurrent, Transformer, and ensemble architectures."""
 
+from sodium_twin.legacy_artifacts import load_pickle_model
 import logging
 import numpy as np
 import warnings
@@ -186,7 +187,7 @@ class XGBoostWrapper:
     def load(cls, filepath: str, cfg=None) -> "XGBoostWrapper":
         """Load."""
         import joblib
-        state = joblib.load(filepath)
+        state = load_pickle_model(filepath)
         wrapper = cls(
             cfg=state.get('config', cfg),
             residual_learning=state.get('residual_learning', False),
